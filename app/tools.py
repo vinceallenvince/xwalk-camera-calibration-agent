@@ -147,11 +147,17 @@ def analyse_conditions(image_bytes: bytes, mime_type: str = "image/png") -> dict
 # ---------------------------------------------------------------------------
 
 ROBOFLOW_API_KEY = os.environ.get("ROBOFLOW_API_KEY", "")
-WORKFLOW_URL = os.environ.get(
-    "CALIBRATION_WORKFLOW_URL",
+STRIPE_WORKFLOW_URL = os.environ.get(
+    "CALIBRATION_STRIPE_WORKFLOW_URL",
     "https://serverless.roboflow.com/vince-vinceallen-com/workflows/crosswalk-stripe-detection-1786299496725",
 )
+BOUNDARY_WORKFLOW_URL = os.environ.get(
+    "CALIBRATION_BOUNDARY_WORKFLOW_URL",
+    "https://serverless.roboflow.com/vince-vinceallen-com/workflows/crosswalk-boundary-detection-1786302696881",
+)
 MEDIAN_GAP = (175, 280)
+BOUNDARY_MIN_CONFIDENCE = 0.8
+BOUNDARY_MIN_WIDTH = 30
 MAX_WIDTH = 50
 MIN_HEIGHT = 5
 MIN_CONFIDENCE = 0.7
@@ -169,12 +175,50 @@ def _dedup(detections: list[dict]) -> list[dict]:
     return sorted(kept, key=lambda d: d["x"])
 
 
+def detect_boundaries(image_bytes: bytes) -> dict[str, Any]:
+    """Detect the left and right crosswalk boundary polygons using Roboflow."""
+    b64 = base64.b64encode(image_bytes).decode()
+
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(BOUNDARY_WORKFLOW_URL, json={
+            "api_key": ROBOFLOW_API_KEY,
+            "inputs": {"image": {"type": "base64", "value": b64}},
+        })
+        resp.raise_for_status()
+
+    output = resp.json()["outputs"][0]
+    preds = output["predictions"].get("predictions", [])
+
+    # Keep only high-confidence, large detections (the two real crosswalks).
+    real = sorted(
+        [p for p in preds if p.get("confidence", 0) >= BOUNDARY_MIN_CONFIDENCE and p.get("width", 0) >= BOUNDARY_MIN_WIDTH],
+        key=lambda p: p["x"],
+    )
+
+    left_polygon: list[list[float]] = []
+    right_polygon: list[list[float]] = []
+
+    for det in real:
+        polygon = [[pt["x"], pt["y"]] for pt in det.get("points", [])]
+        if det["x"] < MEDIAN_GAP[0]:
+            left_polygon = polygon
+        elif det["x"] > MEDIAN_GAP[1]:
+            right_polygon = polygon
+
+    return {
+        "leftCrosswalk": left_polygon,
+        "rightCrosswalk": right_polygon,
+        "raw_count": len(preds),
+        "filtered_count": len(real),
+    }
+
+
 def detect_stripes(image_bytes: bytes) -> dict[str, Any]:
     """Detect crosswalk stripes using the Roboflow workflow and match to reference."""
     b64 = base64.b64encode(image_bytes).decode()
 
     with httpx.Client(timeout=30) as client:
-        resp = client.post(WORKFLOW_URL, json={
+        resp = client.post(STRIPE_WORKFLOW_URL, json={
             "api_key": ROBOFLOW_API_KEY,
             "inputs": {"image": {"type": "base64", "value": b64}},
         })

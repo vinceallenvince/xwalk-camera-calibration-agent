@@ -71,6 +71,8 @@ def save(record: dict[str, Any]) -> dict[str, Any]:
                 "conditions": record["conditions"],
                 "confidence": record["confidence"],
                 "referenceFrame": record.get("referenceFrame"),
+                "leftCrosswalk": record.get("leftCrosswalk"),
+                "rightCrosswalk": record.get("rightCrosswalk"),
                 "stripes": record.get("stripes"),
             }
             blob.upload_from_string(

@@ -19,7 +19,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.reference import REFERENCE_CALIBRATION, STRIPE_COUNT
-from app.tools import analyse_conditions, detect_stripes
+from app.tools import analyse_conditions, detect_boundaries, detect_stripes
 from app.persist import save
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -67,13 +67,20 @@ async def calibrate(
 
     # Step 2: Roboflow detection (if crosswalk is visible)
     detection_result: dict[str, Any] | None = None
+    boundary_result: dict[str, Any] | None = None
     if status not in ("no_crosswalk", "feed_down"):
         try:
             detection_result = detect_stripes(image)
         except Exception as error:  # noqa: BLE001
-            # Detection failure degrades the run but does not crash it.
-            reasoning = (reasoning or "") + f" Detection failed: {error}"
+            reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
             status = "degraded"
+
+        try:
+            boundary_result = detect_boundaries(image)
+        except Exception as error:  # noqa: BLE001
+            reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
+            # Boundary failure is non-fatal — stripes still work, the client
+            # falls back to the baked-in crosswalk polygons.
 
     # Step 3: Merge and determine publishability
     if detection_result and not detection_result.get("count_match"):
@@ -91,6 +98,8 @@ async def calibrate(
         "conditions": conditions,
         "confidence": confidence,
         "referenceFrame": (detection_result or {}).get("referenceFrame", REFERENCE_CALIBRATION["referenceFrame"]),
+        "leftCrosswalk": (boundary_result or {}).get("leftCrosswalk"),
+        "rightCrosswalk": (boundary_result or {}).get("rightCrosswalk"),
         "stripes": (detection_result or {}).get("stripes"),
         "stripe_count": (detection_result or {}).get("stripe_count"),
         "visible_count": (detection_result or {}).get("visible_count"),
