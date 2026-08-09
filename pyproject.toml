@@ -1,0 +1,28 @@
+[project]
+name = "xwalk-camera-calibration-agent"
+version = "0.1.0"
+description = "Relocates the XWALK KEYBOARDS Realtime crosswalk calibration onto a current camera frame."
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=1.0.0",
+    "google-genai>=1.0.0",
+    "google-cloud-storage>=2.18.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pillow>=10.0.0",
+]
+
+# Pinned so the project resolves against public PyPI regardless of any
+# machine-level UV_DEFAULT_INDEX / PIP_INDEX_URL pointing at a private mirror.
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
