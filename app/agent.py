@@ -62,11 +62,36 @@ y=0 the top edge, y=1000 the bottom edge. Never report source pixels.
 THE REFERENCE CALIBRATION (hand-authored, normalized 0-1000):
 {json.dumps(_normalized_reference(), separators=(",", ":"))}
 
-The reference defines {STRIPE_COUNT} painted crosswalk stripes. Stripes 1-18 are
+The reference defines {STRIPE_COUNT} crosswalk stripe CELLS. Stripes 1-18 are
 the LEFT crosswalk (left of the bollard median), read left to right. Stripes
 19-25 are the RIGHT crosswalk (right of the median), read left to right. Each
-stripe is one painted white bar, described by a 4-point quadrilateral following
-that bar's own perspective.
+cell is a 4-point quadrilateral, in the order:
+  [top-left, top-right, bottom-right, bottom-left]
+following the painted bar's own perspective — the bars lean, so the bottom edge
+is offset from the top edge.
+
+CELL GEOMETRY — this is a playable keyboard, not an outline of the paint:
+
+Each cell is CENTRED on one painted white bar, and extends outward to the
+MIDDLE of the dark gap on each side. Do NOT align a cell edge to the edge of a
+white bar.
+
+    paint:      ██  gap  ██  gap  ██
+    cells:    |--A--|--B--|--C--|      <- seams sit mid-gap, cells touch
+
+Concretely:
+- The seam between cell N and cell N+1 runs down the MIDDLE of the dark gap
+  between bar N and bar N+1.
+- Cells within a crosswalk must TILE CONTIGUOUSLY: cell N's right edge and cell
+  N+1's left edge are the SAME edge. Cell N's top-right point equals cell N+1's
+  top-left point, and cell N's bottom-right point equals cell N+1's bottom-left
+  point. No gaps, no overlaps.
+- The outer edge of the first and last cell in a segment extends half a gap
+  beyond the outermost bar, so the segment's coverage is symmetric.
+
+This matters because a pedestrian standing in the gap between two bars must
+still play a note — the nearest one. Cells that only cover the paint leave dead
+zones between the keys.
 
 RULES — these matter more than anything else:
 
@@ -77,15 +102,22 @@ RULES — these matter more than anything else:
    too faded — set "visible": false, return an empty polygon, and give a short
    "reason". Do NOT guess its position, and do NOT shift other stripes to fill
    the gap.
-3. Stripe N in your output must be the SAME physical painted bar as stripe N in
-   the reference. Anchor on the reference coordinates, then adjust for how the
-   view has moved.
+3. Cell N must be centred on the SAME physical painted bar as cell N in the
+   reference. The reference coordinates are an accurate positional anchor —
+   trust them and adjust for how the view has moved, rather than re-deriving
+   the crosswalk from scratch. The one thing to change is the alignment
+   convention: reference cells begin at a bar's left edge, whereas your cells
+   are centred on the bar with seams mid-gap. Expect your cells to sit roughly
+   half a bar-width to the right of the matching reference cell, and to be
+   wider. Everything else — position of the band, its slope, its perspective —
+   should stay very close to the reference.
 4. A stripe partly hidden by a vehicle but whose position you can still infer
    from its neighbours and the road geometry IS visible — report it. Reserve
    "visible": false for bars you genuinely cannot place.
-5. The reference's rightmost stripes extend slightly past the frame edge (x near
-   or above 1000). That is expected; report geometry as it truly is, clamping
-   only at 1000.
+5. The reference's rightmost cells extend past the frame edge (x above 1000).
+   That is expected and correct. Report the true geometry and let x exceed 1000
+   — do NOT clamp to 1000, because clamping collapses the last cell into a
+   degenerate sliver.
 
 ALSO REPORT:
 - leftCrosswalk / rightCrosswalk: a 4-point quadrilateral enclosing each
@@ -107,6 +139,31 @@ Prefer admitting uncertainty over producing confident, wrong geometry. A stale
 calibration is recoverable; a confidently wrong one silently breaks the
 instrument.
 """
+
+UPSCALE = int(os.environ.get("CALIBRATION_UPSCALE", "4"))
+
+
+def _upscaled(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+    """Enlarge the frame so ~10px painted bars become grounding-sized.
+
+    Returns the original bytes unchanged if upscaling is disabled or fails —
+    a resize problem should never take down a calibration run.
+    """
+    if UPSCALE <= 1:
+        return image_bytes, mime_type
+    try:
+        import io
+
+        from PIL import Image
+
+        source = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        enlarged = source.resize((source.width * UPSCALE, source.height * UPSCALE), Image.LANCZOS)
+        buffer = io.BytesIO()
+        enlarged.save(buffer, format="PNG")
+        return buffer.getvalue(), "image/png"
+    except Exception:  # noqa: BLE001
+        return image_bytes, mime_type
+
 
 _CLIENT: genai.Client | None = None
 
@@ -140,8 +197,14 @@ def analyse_frame(image_bytes: bytes, mime_type: str = "image/png") -> dict[str,
 
     Returns the record with geometry converted to source pixels, plus the raw
     normalized response under `_normalized` for auditing.
+
+    The source frame is only 352 x 240, where a painted bar is ~10px wide —
+    too small to ground reliably. It is upscaled before being sent. Because the
+    model answers in a normalized 0-1000 grid, the upscale factor never enters
+    the arithmetic: results still map back to original source pixels.
     """
     width, height = sniff_image_size(image_bytes)
+    sent_bytes, sent_mime = _upscaled(image_bytes, mime_type)
 
     response = _client().models.generate_content(
         model=MODEL,
@@ -149,7 +212,7 @@ def analyse_frame(image_bytes: bytes, mime_type: str = "image/png") -> dict[str,
             types.Content(
                 role="user",
                 parts=[
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    types.Part.from_bytes(data=sent_bytes, mime_type=sent_mime),
                     types.Part.from_text(
                         text="Relocate the reference calibration onto this frame. "
                         "Answer in the normalized 0-1000 grid. Follow the stripe identity rules exactly."

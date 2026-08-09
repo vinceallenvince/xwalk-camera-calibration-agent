@@ -176,6 +176,32 @@ def validate(payload: dict[str, Any], *, area_tolerance: float = 0.6, drift_cap_
         if len(xs) > 2 and xs != sorted(xs):
             failures.append(f"{segment} segment: stripe centroids are not monotonic left-to-right")
 
+    # --- seam contiguity ------------------------------------------------------
+    # Cells are meant to tile: cell N's right edge is cell N+1's left edge, with
+    # the seam running down the middle of the gap between painted bars. Measured
+    # as a warning while the prompt is being tuned; promote to a failure once
+    # the model holds the contract reliably.
+    by_index = {s.get("stripeIndex"): s for s in visible}
+    seam_gaps: list[float] = []
+    for index in sorted(by_index):
+        nxt = by_index.get(index + 1)
+        current = by_index[index]
+        if not nxt or SEGMENT_BY_INDEX.get(index) != SEGMENT_BY_INDEX.get(index + 1):
+            continue
+        a, b = current.get("polygon") or [], nxt.get("polygon") or []
+        if len(a) != 4 or len(b) != 4:
+            continue
+        # polygon order is [top-left, top-right, bottom-right, bottom-left]
+        top_gap = ((a[1][0] - b[0][0]) ** 2 + (a[1][1] - b[0][1]) ** 2) ** 0.5
+        bottom_gap = ((a[2][0] - b[3][0]) ** 2 + (a[2][1] - b[3][1]) ** 2) ** 0.5
+        seam_gaps.append(max(top_gap, bottom_gap))
+
+    max_seam_gap = max(seam_gaps) if seam_gaps else 0.0
+    if max_seam_gap > 2.0:
+        warnings.append(
+            f"cells are not contiguous: worst seam mismatch {max_seam_gap:.1f}px between adjacent cells"
+        )
+
     # --- crosswalk quads ------------------------------------------------------
     for key in ("leftCrosswalk", "rightCrosswalk"):
         polygon = payload.get(key) or []
@@ -196,6 +222,7 @@ def validate(payload: dict[str, Any], *, area_tolerance: float = 0.6, drift_cap_
             "totalStripes": len(stripes),
             "maxDisplacementPx": round(max_displacement, 2),
             "meanDisplacementPx": round(mean_displacement, 2),
+            "maxSeamGapPx": round(max_seam_gap, 2),
         },
     }
 
