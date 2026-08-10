@@ -1,12 +1,24 @@
-"""Persistence: BigQuery (historical record) + GCS (live calibration).
+"""Persistence: BigQuery (historical record) + GCS (live calibration + archive).
 
-Every run appends one row to BigQuery. Successful runs also overwrite the
-GCS object the web client reads.
+Every run:
+  - Appends one row to BigQuery (the Looker Studio source).
+  - Archives the JSON record AND the source frame to GCS history.
+  - On a successful publish (status ok, counts match), overwrites the
+    current/ JSON that the web client reads. The image is never written to
+    current/ — the client only needs polygons.
+
+GCS layout:
+  calibration/
+    current/
+      camera_5056.json                          ← web client reads this
+    history/
+      camera_5056/
+        run-20260810T135245Z-ea461a.json         ← every run
+        run-20260810T135245Z-ea461a.png          ← the frame that was analysed
 """
 
 import json
 import os
-from datetime import datetime, timezone
 from typing import Any
 
 BUCKET = os.environ.get("CALIBRATION_BUCKET", "xwalk-keyboards-01")
@@ -14,12 +26,20 @@ BQ_TABLE = os.environ.get("CALIBRATION_BQ_TABLE", "xwalk-keyboards-01.calibratio
 GCS_PREFIX = os.environ.get("CALIBRATION_GCS_PREFIX", "calibration")
 
 
-def _gcs_path(camera_id: int) -> str:
+def _current_path(camera_id: int) -> str:
     return f"{GCS_PREFIX}/current/camera_{camera_id}.json"
 
 
-def save(record: dict[str, Any]) -> dict[str, Any]:
-    """Append to BigQuery and optionally publish to GCS. Returns storage paths."""
+def _history_path(camera_id: int, run_id: str, ext: str) -> str:
+    return f"{GCS_PREFIX}/history/camera_{camera_id}/{run_id}.{ext}"
+
+
+def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
+    """Append to BigQuery, archive to GCS history, and optionally publish.
+
+    `frame` is the raw image bytes used for this calibration run. When provided
+    it is archived alongside the JSON record so every run is self-contained.
+    """
     result: dict[str, Any] = {}
 
     # --- BigQuery ---
@@ -54,14 +74,39 @@ def save(record: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         result["bigquery"] = {"error": str(exc)}
 
-    # --- GCS (auto-publish on ok) ---
+    # --- GCS history (every run) ---
+    try:
+        from google.cloud import storage
+
+        bucket = storage.Client().bucket(BUCKET)
+        run_id = record.get("runId", "unknown")
+        camera_id = record.get("cameraId", 5056)
+
+        # Archive the JSON record.
+        history_json_path = _history_path(camera_id, run_id, "json")
+        bucket.blob(history_json_path).upload_from_string(
+            json.dumps(record, indent=2), content_type="application/json",
+        )
+        result["history_json"] = f"gs://{BUCKET}/{history_json_path}"
+
+        # Archive the source frame alongside it.
+        if frame:
+            is_png = frame[:4] == b"\x89PNG"
+            ext = "png" if is_png else "jpg"
+            mime = "image/png" if is_png else "image/jpeg"
+            history_frame_path = _history_path(camera_id, run_id, ext)
+            bucket.blob(history_frame_path).upload_from_string(frame, content_type=mime)
+            result["history_frame"] = f"gs://{BUCKET}/{history_frame_path}"
+    except Exception as exc:  # noqa: BLE001
+        result["history"] = {"error": str(exc)}
+
+    # --- GCS current (only on successful publish) ---
     if record.get("published"):
         try:
-            from google.cloud import storage
+            from google.cloud import storage as gcs
 
-            bucket = storage.Client().bucket(BUCKET)
-            path = _gcs_path(record["cameraId"])
-            blob = bucket.blob(path)
+            bucket = gcs.Client().bucket(BUCKET)
+            path = _current_path(record["cameraId"])
 
             calibration = {
                 "cameraId": record["cameraId"],
@@ -75,12 +120,11 @@ def save(record: dict[str, Any]) -> dict[str, Any]:
                 "rightCrosswalk": record.get("rightCrosswalk"),
                 "stripes": record.get("stripes"),
             }
-            blob.upload_from_string(
-                json.dumps(calibration, indent=2),
-                content_type="application/json",
+            bucket.blob(path).upload_from_string(
+                json.dumps(calibration, indent=2), content_type="application/json",
             )
-            result["gcs"] = f"gs://{BUCKET}/{path}"
+            result["current"] = f"gs://{BUCKET}/{path}"
         except Exception as exc:  # noqa: BLE001
-            result["gcs"] = {"error": str(exc)}
+            result["current"] = {"error": str(exc)}
 
     return result

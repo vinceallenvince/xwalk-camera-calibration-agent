@@ -116,9 +116,9 @@ async def calibrate(
         "published": should_publish,
     }
 
-    # Step 4: Persist
+    # Step 4: Persist (with the source frame for the archive)
     try:
-        record["storage"] = save(record)
+        record["storage"] = save(record, frame=image)
     except Exception as error:  # noqa: BLE001
         record["storage"] = {"error": str(error)}
 
@@ -223,7 +223,7 @@ async def calibrate_scheduled(request: Request) -> JSONResponse:
     }
 
     try:
-        record["storage"] = save(record)
+        record["storage"] = save(record, frame=image)
     except Exception as error:  # noqa: BLE001
         record["storage"] = {"error": str(error)}
 
