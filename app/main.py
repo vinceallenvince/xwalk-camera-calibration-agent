@@ -127,7 +127,7 @@ async def calibrate(
 
 SNAPSHOT_URL = os.environ.get(
     "CALIBRATION_SNAPSHOT_URL",
-    "https://xwalk-keyboards-21826886868.us-central1.run.app/api/snapshot/5056",
+    "https://511ny.org/map/Cctv/5056",
 )
 
 
