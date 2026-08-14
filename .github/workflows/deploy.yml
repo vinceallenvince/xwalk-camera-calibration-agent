@@ -15,7 +15,7 @@
 #     --display-name "GitHub Actions deploy"
 #
 #   # 2. Grant it Cloud Run Developer + Service Account User + Cloud Build Editor (skip if already done)
-#   for ROLE in roles/run.developer roles/iam.serviceAccountUser roles/cloudbuild.builds.editor roles/storage.admin; do
+#   for ROLE in roles/run.developer roles/iam.serviceAccountUser roles/cloudbuild.builds.editor roles/storage.admin roles/artifactregistry.writer; do
 #     gcloud projects add-iam-policy-binding $PROJECT_ID \
 #       --member "serviceAccount:${SERVICE_ACCOUNT}" \
 #       --role "$ROLE"
