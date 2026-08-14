@@ -87,7 +87,9 @@ jobs:
           URL=$(gcloud run services describe xwalk-camera-calibration-agent \
             --region us-central1 \
             --format 'value(status.url)')
-          TOKEN=$(gcloud auth print-identity-token --audiences="$URL")
+          TOKEN=$(gcloud auth print-identity-token \
+            --impersonate-service-account=${{ secrets.WIF_SERVICE_ACCOUNT }} \
+            --audiences="$URL")
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $TOKEN" "$URL/health")
           echo "/health: $STATUS"
           if [ "$STATUS" -ge 400 ]; then
