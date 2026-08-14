@@ -28,3 +28,5 @@ default = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests import `app.*` from the repo root rather than an installed package.
+pythonpath = ["."]

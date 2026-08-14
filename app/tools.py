@@ -1,13 +1,20 @@
 """ADK tools for the calibration agent.
 
-Two tools, each doing what it is good at:
+Three tools, each doing what it is good at:
 
   analyse_conditions  — Gemini Flash classifies the frame and produces
                         status / conditions / reasoning (language).
+  detect_boundaries   — Roboflow workflow returns the crosswalk outlines,
+                        named left-to-right.
   detect_stripes      — Roboflow workflow returns paint-accurate instance
-                        segmentation polygons (geometry).
+                        segmentation polygons, placed along those crosswalks.
 
-The agent decides whether to call detect_stripes based on the conditions result.
+The agent decides whether to run detection based on the conditions result.
+
+Nothing here is specific to a camera. Crosswalks are named by their order in
+the frame, stripes are indexed by position along their crosswalk, and no
+reference calibration is consulted — so pointing this at a new camera needs no
+hand-authored geometry.
 """
 
 import base64
@@ -20,7 +27,7 @@ import httpx
 from google import genai
 from google.genai import types
 
-from app.reference import REFERENCE_CALIBRATION, STRIPE_COUNT
+from app.geometry import assign_segments, index_stripes
 
 # ---------------------------------------------------------------------------
 # Gemini — conditions triage
@@ -155,13 +162,17 @@ BOUNDARY_WORKFLOW_URL = os.environ.get(
     "CALIBRATION_BOUNDARY_WORKFLOW_URL",
     "https://serverless.roboflow.com/vince-vinceallen-com/workflows/crosswalk-boundary-detection-1786302696881",
 )
-MEDIAN_GAP = (175, 280)
 BOUNDARY_MIN_CONFIDENCE = 0.8
 BOUNDARY_MIN_WIDTH = 30
 MAX_WIDTH = 50
 MIN_HEIGHT = 5
 MIN_CONFIDENCE = 0.7
 MIN_CENTROID_DIST = 5.0
+MIN_POLYGON_POINTS = 3
+
+# Segment names, assigned in left-to-right order of the detected crosswalk
+# boundaries. Extra crosswalks beyond these fall back to "segment3", "segment4"…
+SEGMENT_NAMES = ("left", "right")
 
 
 def _dedup(detections: list[dict]) -> list[dict]:
@@ -175,8 +186,20 @@ def _dedup(detections: list[dict]) -> list[dict]:
     return sorted(kept, key=lambda d: d["x"])
 
 
+def _segment_name(position: int) -> str:
+    """Name the nth crosswalk, counting from the left of the frame."""
+    if position < len(SEGMENT_NAMES):
+        return SEGMENT_NAMES[position]
+    return f"segment{position + 1}"
+
+
 def detect_boundaries(image_bytes: bytes) -> dict[str, Any]:
-    """Detect the left and right crosswalk boundary polygons using Roboflow."""
+    """Detect the crosswalk boundary polygons using Roboflow.
+
+    Boundaries are named by their left-to-right order in the frame rather than
+    by fixed pixel ranges, so this works on any camera regardless of where the
+    crosswalks sit or how many there are.
+    """
     b64 = base64.b64encode(image_bytes).decode()
 
     with httpx.Client(timeout=30) as client:
@@ -189,32 +212,47 @@ def detect_boundaries(image_bytes: bytes) -> dict[str, Any]:
     output = resp.json()["outputs"][0]
     preds = output["predictions"].get("predictions", [])
 
-    # Keep only high-confidence, large detections (the two real crosswalks).
+    # Keep only high-confidence, large detections (the real crosswalks, not
+    # painted fragments elsewhere in the frame).
     real = sorted(
         [p for p in preds if p.get("confidence", 0) >= BOUNDARY_MIN_CONFIDENCE and p.get("width", 0) >= BOUNDARY_MIN_WIDTH],
         key=lambda p: p["x"],
     )
 
-    left_polygon: list[list[float]] = []
-    right_polygon: list[list[float]] = []
-
-    for det in real:
+    crosswalks: dict[str, list[list[float]]] = {}
+    for position, det in enumerate(real):
         polygon = [[pt["x"], pt["y"]] for pt in det.get("points", [])]
-        if det["x"] < MEDIAN_GAP[0]:
-            left_polygon = polygon
-        elif det["x"] > MEDIAN_GAP[1]:
-            right_polygon = polygon
+        if len(polygon) >= MIN_POLYGON_POINTS:
+            crosswalks[_segment_name(position)] = polygon
 
     return {
-        "leftCrosswalk": left_polygon,
-        "rightCrosswalk": right_polygon,
+        "crosswalks": crosswalks,
+        # Flattened aliases for the published schema, which names the first two.
+        "leftCrosswalk": crosswalks.get("left", []),
+        "rightCrosswalk": crosswalks.get("right", []),
         "raw_count": len(preds),
         "filtered_count": len(real),
     }
 
 
-def detect_stripes(image_bytes: bytes) -> dict[str, Any]:
-    """Detect crosswalk stripes using the Roboflow workflow and match to reference."""
+def detect_stripes(
+    image_bytes: bytes,
+    boundaries: dict[str, list[list[float]]] | None = None,
+) -> dict[str, Any]:
+    """Detect crosswalk stripes and place each one along its crosswalk.
+
+    Every stripe Roboflow returns is published. There is no reference
+    calibration to match against and no expected count to satisfy — the agent
+    reports the geometry it can see, and the client decides what to do with it.
+
+    Each stripe carries a `stripeIndex`: its slot position measured from the
+    crosswalk's leading edge in units of the stripe pitch. The index is
+    positional, not ordinal, so a stripe keeps the same index when a vehicle
+    hides its neighbours. Missing indexes mean stripes the model could not see.
+
+    Notes are deliberately absent. The stripe index is the whole identity; the
+    client owns the mapping from index to pitch.
+    """
     b64 = base64.b64encode(image_bytes).decode()
 
     with httpx.Client(timeout=30) as client:
@@ -236,56 +274,42 @@ def detect_stripes(image_bytes: bytes) -> dict[str, Any]:
     ]
     clean = _dedup(filtered)
 
-    left = [d for d in clean if d["x"] < MEDIAN_GAP[0]]
-    right = [d for d in clean if d["x"] > MEDIAN_GAP[1]]
-
-    ref_left = [s for s in REFERENCE_CALIBRATION["stripes"] if s["segment"] == "left"]
-    ref_right = [s for s in REFERENCE_CALIBRATION["stripes"] if s["segment"] == "right"]
+    crosswalks = boundaries or {}
+    grouped = (
+        assign_segments(clean, crosswalks)
+        if crosswalks
+        # With no boundary to group by, the whole frame is one crosswalk.
+        else {"left": clean}
+    )
 
     stripes: list[dict[str, Any]] = []
-    notes: list[str] = []
     confidences: list[float] = []
+    segment_counts: dict[str, int] = {}
 
-    for seg_name, detected, reference in [("left", left, ref_left), ("right", right, ref_right)]:
-        if len(detected) != len(reference):
-            notes.append(f"{seg_name}: detected {len(detected)}, reference expects {len(reference)}")
-        for i, ref in enumerate(reference):
-            if i < len(detected):
-                det = detected[i]
-                polygon = [[pt["x"], pt["y"]] for pt in det.get("points", [])]
-                conf = det.get("confidence", 0)
-                confidences.append(conf)
-                stripes.append({
-                    "stripeIndex": ref["stripeIndex"],
-                    "segment": seg_name,
-                    "note": ref["note"],
-                    "visible": True,
-                    "polygon": polygon,
-                    "confidence": conf,
-                })
-            else:
-                stripes.append({
-                    "stripeIndex": ref["stripeIndex"],
-                    "segment": seg_name,
-                    "note": ref["note"],
-                    "visible": False,
-                    "polygon": [],
-                })
+    for name, detections in grouped.items():
+        candidates = []
+        for det in detections:
+            polygon = [[pt["x"], pt["y"]] for pt in det.get("points", [])]
+            if len(polygon) < MIN_POLYGON_POINTS:
+                continue
+            confidence = det.get("confidence", 0)
+            confidences.append(confidence)
+            candidates.append({
+                "segment": name,
+                "polygon": polygon,
+                "confidence": confidence,
+            })
 
-    stripes.sort(key=lambda s: s["stripeIndex"])
-    visible = sum(1 for s in stripes if s["visible"])
+        segment_counts[name] = len(candidates)
+        stripes.extend(index_stripes(crosswalks.get(name, []), candidates))
+
+    stripes.sort(key=lambda s: (s["segment"], s["stripeIndex"]))
 
     return {
         "stripes": stripes,
-        "matching": {
-            "counts": {"left": len(left), "right": len(right)},
-            "notes": notes,
-            "clean": not notes,
-        },
+        "segments": segment_counts,
         "stripe_count": len(clean),
-        "visible_count": visible,
-        "expected_count": STRIPE_COUNT,
-        "count_match": not notes,
+        "visible_count": len(stripes),
         "max_confidence": max(confidences) if confidences else 0,
         "min_confidence": min(confidences) if confidences else 0,
         "mean_confidence": round(statistics.mean(confidences), 4) if confidences else 0,

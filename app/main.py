@@ -19,14 +19,29 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.reference import REFERENCE_CALIBRATION, STRIPE_COUNT
+from app.coords import sniff_image_size
 from app.tools import analyse_conditions, detect_boundaries, detect_stripes
 from app.persist import save
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+DEFAULT_CAMERA_ID = int(os.environ.get("CALIBRATION_CAMERA_ID", "5056"))
 API_KEY = os.environ.get("CALIBRATION_AGENT_API_KEY")
 
 app = FastAPI(title="xwalk-camera-calibration-agent")
+
+
+def _frame_size(image: bytes) -> dict[str, int] | None:
+    """Frame dimensions read from the image header.
+
+    Roboflow reports these when detection runs; this covers the case where it
+    did not, so the published polygons always carry the frame they were
+    measured in.
+    """
+    try:
+        width, height = sniff_image_size(image)
+    except Exception:  # noqa: BLE001
+        return None
+    return {"width": width, "height": height} if width and height else None
 
 
 @app.get("/health")
@@ -38,7 +53,7 @@ def health() -> dict[str, Any]:
 async def calibrate(
     request: Request,
     frame: UploadFile = File(...),
-    cameraId: int = Form(REFERENCE_CALIBRATION["cameraId"]),
+    cameraId: int = Form(DEFAULT_CAMERA_ID),
 ) -> JSONResponse:
     if API_KEY and request.headers.get("x-api-key") != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
@@ -66,28 +81,33 @@ async def calibrate(
     gemini_tokens = (conditions_result.get("_usage") or {}).get("totalTokens")
     model = conditions_result.get("_model")
 
-    # Step 2: Roboflow detection (if crosswalk is visible)
+    # Step 2: Roboflow detection (if crosswalk is visible). Boundaries run
+    # first — they tell the stripe pass which crosswalk each detection belongs
+    # to and where to measure slot positions from.
     detection_result: dict[str, Any] | None = None
     boundary_result: dict[str, Any] | None = None
     if status not in ("no_crosswalk", "feed_down"):
         try:
-            detection_result = detect_stripes(image)
+            boundary_result = detect_boundaries(image)
+        except Exception as error:  # noqa: BLE001
+            reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
+            # Non-fatal: stripes are still indexed, off their own extent.
+
+        try:
+            detection_result = detect_stripes(image, (boundary_result or {}).get("crosswalks"))
         except Exception as error:  # noqa: BLE001
             reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
             status = "degraded"
 
-        try:
-            boundary_result = detect_boundaries(image)
-        except Exception as error:  # noqa: BLE001
-            reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
-            # Boundary failure is non-fatal — stripes still work, the client
-            # falls back to the baked-in crosswalk polygons.
-
-    # Step 3: Merge and determine publishability
-    if detection_result and not detection_result.get("count_match"):
-        status = "needs_review"
-
-    should_publish = status == "ok" and detection_result is not None
+    # Step 3: Determine publishability.
+    #
+    # Gemini has already rejected frames with no crosswalk, so any stripes
+    # Roboflow returns describe real paint. Publish them. Occlusion varies
+    # frame to frame and a partial read is still a correct read — each stripe
+    # carries its own position, so the client renders what it is given without
+    # needing a complete set.
+    visible = (detection_result or {}).get("visible_count", 0)
+    should_publish = detection_result is not None and visible > 0
     elapsed_ms = round((time.monotonic() - started) * 1000)
 
     record: dict[str, Any] = {
@@ -98,18 +118,17 @@ async def calibrate(
         "reasoning": reasoning,
         "conditions": conditions,
         "confidence": confidence,
-        "referenceFrame": (detection_result or {}).get("referenceFrame", REFERENCE_CALIBRATION["referenceFrame"]),
+        "referenceFrame": (detection_result or {}).get("referenceFrame") or _frame_size(image),
+        "crosswalks": (boundary_result or {}).get("crosswalks"),
         "leftCrosswalk": (boundary_result or {}).get("leftCrosswalk"),
         "rightCrosswalk": (boundary_result or {}).get("rightCrosswalk"),
         "stripes": (detection_result or {}).get("stripes"),
         "stripe_count": (detection_result or {}).get("stripe_count"),
-        "visible_count": (detection_result or {}).get("visible_count"),
-        "expected_count": STRIPE_COUNT,
-        "count_match": (detection_result or {}).get("count_match"),
+        "visible_count": visible,
         "max_confidence": (detection_result or {}).get("max_confidence"),
         "min_confidence": (detection_result or {}).get("min_confidence"),
         "mean_confidence": (detection_result or {}).get("mean_confidence"),
-        "matching_notes": (detection_result or {}).get("matching", {}).get("notes"),
+        "matching_notes": (detection_result or {}).get("segments"),
         "model": model,
         "elapsed_ms": elapsed_ms,
         "gemini_tokens": gemini_tokens,
@@ -156,7 +175,7 @@ async def calibrate_scheduled(request: Request) -> JSONResponse:
     if not image or len(image) < 1000:
         raise HTTPException(status_code=502, detail="Camera frame is empty or too small")
 
-    camera_id = REFERENCE_CALIBRATION["cameraId"]
+    camera_id = DEFAULT_CAMERA_ID
     run_id = f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
     started = time.monotonic()
     mime = "image/png" if "png" in content_type else "image/jpeg"
@@ -174,25 +193,23 @@ async def calibrate_scheduled(request: Request) -> JSONResponse:
     gemini_tokens = (conditions_result.get("_usage") or {}).get("totalTokens")
     model = conditions_result.get("_model")
 
-    # Step 2: Roboflow detection
+    # Step 2: Roboflow detection — boundaries first, same as /api/calibrate.
     detection_result: dict[str, Any] | None = None
     boundary_result: dict[str, Any] | None = None
     if status not in ("no_crosswalk", "feed_down"):
-        try:
-            detection_result = detect_stripes(image)
-        except Exception as error:  # noqa: BLE001
-            reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
-            status = "degraded"
-
         try:
             boundary_result = detect_boundaries(image)
         except Exception as error:  # noqa: BLE001
             reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
 
-    if detection_result and not detection_result.get("count_match"):
-        status = "needs_review"
+        try:
+            detection_result = detect_stripes(image, (boundary_result or {}).get("crosswalks"))
+        except Exception as error:  # noqa: BLE001
+            reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
+            status = "degraded"
 
-    should_publish = status == "ok" and detection_result is not None
+    visible = (detection_result or {}).get("visible_count", 0)
+    should_publish = detection_result is not None and visible > 0
     elapsed_ms = round((time.monotonic() - started) * 1000)
 
     record: dict[str, Any] = {
@@ -203,18 +220,17 @@ async def calibrate_scheduled(request: Request) -> JSONResponse:
         "reasoning": reasoning,
         "conditions": conditions,
         "confidence": confidence,
-        "referenceFrame": (detection_result or {}).get("referenceFrame", REFERENCE_CALIBRATION["referenceFrame"]),
+        "referenceFrame": (detection_result or {}).get("referenceFrame") or _frame_size(image),
+        "crosswalks": (boundary_result or {}).get("crosswalks"),
         "leftCrosswalk": (boundary_result or {}).get("leftCrosswalk"),
         "rightCrosswalk": (boundary_result or {}).get("rightCrosswalk"),
         "stripes": (detection_result or {}).get("stripes"),
         "stripe_count": (detection_result or {}).get("stripe_count"),
-        "visible_count": (detection_result or {}).get("visible_count"),
-        "expected_count": STRIPE_COUNT,
-        "count_match": (detection_result or {}).get("count_match"),
+        "visible_count": visible,
         "max_confidence": (detection_result or {}).get("max_confidence"),
         "min_confidence": (detection_result or {}).get("min_confidence"),
         "mean_confidence": (detection_result or {}).get("mean_confidence"),
-        "matching_notes": (detection_result or {}).get("matching", {}).get("notes"),
+        "matching_notes": (detection_result or {}).get("segments"),
         "model": model,
         "elapsed_ms": elapsed_ms,
         "gemini_tokens": gemini_tokens,

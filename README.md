@@ -37,18 +37,26 @@ Calibration Agent (Cloud Run)
 
 **Roboflow** does the geometry — paint-accurate instance segmentation polygons in ~1s. This is the only approach tested that produced correct geometry on both crosswalks.
 
-**Code** does the bookkeeping — stripe identity (which bar maps to which note) is assigned deterministically by position, never by the model.
+**Code** does the bookkeeping — it places each detected bar on its crosswalk and hands back a position. It never decides what a bar sounds like.
 
-## Reference calibration
+## Stripe positions, not notes
 
-The agent relocates a known calibration, it does not discover crosswalks from scratch. The hand-authored reference in [`app/reference.py`](app/reference.py) defines:
+The agent is camera-agnostic. The production path holds no reference calibration, expects no particular number of stripes, and emits no note names. Pointing it at a new camera needs no hand-authored geometry.
 
-- **25 crosswalk stripes** — 18 on the left crosswalk (C4–F5), 7 on the right (F#5–B5)
-- **Stripe identity** — each stripe has a fixed index, segment (left/right), and MIDI note
-- **Cell geometry** — each stripe is a 4-point quadrilateral centred on a painted bar, extending to the mid-gap on each side so there are no dead zones between keys
-- **Reference frame** — 352 × 240 native HLS frame of View 5056
+Each published stripe carries a **`stripeIndex`**: its slot position along the crosswalk, measured from the boundary's leading edge in units of the stripe pitch. Two properties make that usable as an identity:
 
-Kept in sync with `src/lib/realtime-calibration.ts` in the xwalk-keyboards web app.
+- It is measured against the **crosswalk boundary**, not the detection list, so a bar keeps its index when a vehicle hides its neighbours.
+- The pitch is the **median** gap between detections, which survives missing bars — one absent stripe makes a single double-width gap, and the median ignores it.
+
+Gaps in the index sequence are meaningful: they are bars the model could not see in that frame.
+
+Crosswalk segments are named by their left-to-right order in the frame (`left`, `right`, then `segment3`…), so nothing depends on where a particular camera's crosswalks sit.
+
+**The client owns the music.** Mapping an index to a pitch is the web app's job — see `SCALE_BY_SEGMENT` in `src/lib/use-calibration.ts` in xwalk-keyboards. The agent only reports where the paint is.
+
+> **Known limit.** If a detected boundary grows or shrinks by a whole stripe pitch, every index shifts by one — genuinely indistinguishable from a crosswalk with one more bar at its leading edge. Sub-pitch noise, the realistic case, is cancelled by phase-snapping to the detections' own lattice. Treat the index as a stable *relative* position, not an absolute anchor. See [`app/geometry.py`](app/geometry.py).
+
+`app/reference.py` still backs the alternate Gemini geometry paths (`agent.py`, `detect.py`, `match.py`), which are not part of the production pipeline.
 
 ## API
 
@@ -64,13 +72,17 @@ Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY` is
 
 | Status | Meaning | Publishes? |
 |--------|---------|------------|
-| `ok` | Fresh, validated, stripe counts match | ✓ |
-| `degraded` | Visible but partially obstructed or low quality | ✗ |
-| `no_crosswalk` | Camera re-aimed or fully obstructed | ✗ |
+| `ok` | Both crosswalks clearly visible, normal conditions | ✓ |
+| `degraded` | Visible but partially obstructed or low quality | ✓ |
+| `needs_review` | Camera appears repositioned, or the paint re-striped | ✓ |
+| `no_crosswalk` | Camera re-aimed away, or fully obstructed | ✗ |
 | `feed_down` | Source outage (placeholder image) | ✗ |
-| `needs_review` | Stripe count mismatch or large change | ✗ |
 
-Only `ok` runs overwrite the live calibration in GCS. Failed runs are recorded in BigQuery but leave the live calibration unchanged.
+Publishing is gated on **detection, not classification**. Gemini has already rejected frames with no crosswalk in them, so any stripes Roboflow returns describe real paint — a run publishes whenever it detected at least one stripe.
+
+This is deliberate. Occlusion varies frame to frame, and a partial read is still a correct read: every stripe carries its own position, so the client renders what it is given without needing a complete set. An earlier version required the detected stripe count to match a 25-stripe reference exactly, which rejected **346 consecutive runs** between 2026-08-11 and 2026-08-14 while the camera drifted — the web app kept serving a stale calibration that no longer sat on the paint.
+
+Runs that publish nothing are still recorded in BigQuery and archived to GCS history, leaving the live calibration untouched.
 
 ## Persistence
 
@@ -86,6 +98,19 @@ The web client reads one JSON file on page load:
 gs://xwalk-keyboards-01/calibration/current/camera_5056.json
 ```
 
+Each stripe in it is pure geometry — a position and an outline, in source pixels:
+
+```jsonc
+{
+  "stripeIndex": 7,        // slot along the crosswalk, 0-based, per segment
+  "segment": "left",       // crosswalk name, left-to-right in the frame
+  "polygon": [[x, y]],     // instance-segmentation outline
+  "confidence": 0.93
+}
+```
+
+Only detected stripes appear; there are no placeholder entries. `referenceFrame` gives the frame these coordinates were measured in, and consumers scale from it.
+
 Every run also archives its full JSON record and source frame to GCS history:
 
 ```
@@ -98,25 +123,29 @@ gs://xwalk-keyboards-01/calibration/history/camera_5056/<runId>.png
 ```
 app/
   main.py               FastAPI HTTP surface (health, calibrate, calibrate-scheduled)
-  agent.py              Gemini Pro calibration agent (unused in current pipeline)
-  calibration_agent.py  ADK agent definition
   tools.py              Gemini Flash conditions triage + Roboflow stripe/boundary detection
-  reference.py          Hand-authored View 5056 calibration (25 stripes, notes, polygons)
-  coords.py             Normalized 0-1000 ↔ source pixel conversion
-  schema.py             Gemini structured-output response schema
-  detect.py             Detection utilities
-  match.py              Stripe matching logic
-  roboflow.py           Roboflow client helpers
+  geometry.py           Camera-agnostic stripe placement (axis, pitch, slot indexing)
   persist.py            BigQuery + GCS persistence
+  coords.py             Normalized 0-1000 ↔ source pixel conversion, image size sniffing
   storage.py            GCS storage helpers
+  schema.py             Gemini structured-output response schema
+  calibration_agent.py  ADK agent definition
+  reference.py          Hand-authored View 5056 calibration — alternate paths only
+  agent.py              Gemini Pro calibration agent (unused in current pipeline)
+  detect.py             Detection utilities (unused in current pipeline)
+  match.py              Stripe matching logic (unused in current pipeline)
+  roboflow.py           Roboflow client helpers (unused in current pipeline)
 docs/
   plan.md               Architecture plan and design decisions
 images/                 Reference frames and comparison images
 tests/
+  test_geometry.py      Stripe placement under occlusion and boundary jitter
   compare_variants.py   Head-to-head geometry comparison
   overlay.py            Visual overlay of detected vs reference stripes
   run_local.py          Local calibration runner
 ```
+
+The production pipeline is `main.py` → `tools.py` → `geometry.py` → `persist.py`. The files marked unused are the earlier Gemini-geometry experiments, kept for reference.
 
 ## Setup
 
