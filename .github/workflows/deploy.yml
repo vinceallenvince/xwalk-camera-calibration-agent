@@ -34,6 +34,7 @@
 #     --workload-identity-pool github-pool \
 #     --display-name "GitHub" \
 #     --attribute-mapping "google.subject=assertion.sub,attribute.repository=assertion.repository" \
+#     --attribute-condition "assertion.repository_owner == 'vinceallenvince'" \
 #     --issuer-uri "https://token.actions.githubusercontent.com"
 #
 #   # 5. Allow THIS repo to impersonate the service account
