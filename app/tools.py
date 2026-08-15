@@ -11,8 +11,9 @@ Three tools, each doing what it is good at:
 
 The agent decides whether to run detection based on the conditions result.
 
-Nothing here is specific to a camera. Crosswalks are named by their order in
-the frame, stripes are indexed by position along their crosswalk, and no
+Nothing here is baked to a camera. Triage takes the camera's registered scene
+description as input (see app/cameras.py), crosswalks are named by their order
+in the frame, stripes are indexed by position along their crosswalk, and no
 reference calibration is consulted — so pointing this at a new camera needs no
 hand-authored geometry.
 """
@@ -27,6 +28,7 @@ import httpx
 from google import genai
 from google.genai import types
 
+from app.cameras import CameraConfig
 from app.geometry import assign_segments, index_stripes
 
 # ---------------------------------------------------------------------------
@@ -64,14 +66,23 @@ _CONDITIONS_SCHEMA: dict[str, Any] = {
     },
 }
 
-_CONDITIONS_INSTRUCTION = f"""\
-You are a traffic camera analyst for 511NY View 5056 (West Street at W. 34 St,
-Manhattan). This camera shows two crosswalks separated by a bollard median.
+def conditions_instruction(camera: CameraConfig) -> str:
+    """The triage system prompt, specialized to one camera's scene.
+
+    The scene description is the yardstick the model classifies against — a
+    frame is "ok" when it matches the registered scene, "needs_review" when
+    it doesn't. Judging a new camera against another camera's scene would
+    flag a perfectly good view, which is why this is per-camera config
+    rather than a module constant.
+    """
+    return f"""\
+You are a traffic camera analyst for {camera.name}.
+{camera.scene}
 
 Given a current frame, classify its condition:
 
 status:
-  ok            — both crosswalks are clearly visible, normal conditions
+  ok            — the crosswalks in view are clearly visible, normal conditions
   degraded      — crosswalks are visible but partially obstructed or image quality
                   is reduced (vehicles, rain, glare, darkness)
   no_crosswalk  — the camera has been re-aimed away from the intersection, or the
@@ -113,7 +124,11 @@ def _gemini() -> genai.Client:
     return _GEMINI_CLIENT
 
 
-def analyse_conditions(image_bytes: bytes, mime_type: str = "image/png") -> dict[str, Any]:
+def analyse_conditions(
+    image_bytes: bytes,
+    camera: CameraConfig,
+    mime_type: str = "image/png",
+) -> dict[str, Any]:
     """Classify the frame's condition using Gemini Flash."""
     response = _gemini().models.generate_content(
         model=FLASH_MODEL,
@@ -127,7 +142,7 @@ def analyse_conditions(image_bytes: bytes, mime_type: str = "image/png") -> dict
             )
         ],
         config=types.GenerateContentConfig(
-            system_instruction=_CONDITIONS_INSTRUCTION,
+            system_instruction=conditions_instruction(camera),
             response_mime_type="application/json",
             response_schema=_CONDITIONS_SCHEMA,
             temperature=0.0,

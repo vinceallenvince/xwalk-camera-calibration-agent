@@ -2,7 +2,7 @@
 
 Relocates the [XWALK KEYBOARDS](https://github.com/vinceallenvince/xwalk-keyboards) Realtime crosswalk calibration onto a current camera frame. Deployed to Google Cloud Run and triggered by Cloud Scheduler every 15 minutes.
 
-The camera (511NY View 5056 — West Street at W. 34 St, Manhattan) drifts over time from wind, thermal expansion, and occasional re-aims. This agent detects the current stripe positions and publishes updated calibration data so the web app's keyboard stays aligned with the painted crosswalk.
+Traffic cameras drift over time from wind, thermal expansion, and occasional re-aims. This agent detects the current stripe positions and publishes updated calibration data so the web app's keyboard stays aligned with the painted crosswalk. Cameras are registered in `app/cameras.py` (currently 511NY View 5056 — West Street at W. 34 St, Manhattan); each gets its own Cloud Scheduler job addressing `/api/calibrate-scheduled?cameraId=NNNN`.
 
 ## How it works
 
@@ -64,7 +64,7 @@ Crosswalk segments are named by their left-to-right order in the frame (`left`, 
 |--------|------|------|-------------|
 | `GET` | `/health` | None | Health check |
 | `POST` | `/api/calibrate` | API key | Multipart frame upload → full calibration record |
-| `POST` | `/api/calibrate-scheduled` | API key | No body — fetches a frame from 511NY, then calibrates |
+| `POST` | `/api/calibrate-scheduled` | API key | No body — fetches a frame from the camera's snapshot source, then calibrates. `?cameraId=NNNN` selects the camera; defaults to `CALIBRATION_CAMERA_ID` |
 
 Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY` is set. The web app authenticates using a GCP identity token (Cloud Run IAM).
 
@@ -72,7 +72,7 @@ Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY` is
 
 | Status | Meaning | Publishes? |
 |--------|---------|------------|
-| `ok` | Both crosswalks clearly visible, normal conditions | ✓ |
+| `ok` | The crosswalks in view are clearly visible, normal conditions | ✓ |
 | `degraded` | Visible but partially obstructed or low quality | ✓ |
 | `needs_review` | Camera appears repositioned, or the paint re-striped | ✓ |
 | `no_crosswalk` | Camera re-aimed away, or fully obstructed | ✗ |
@@ -123,8 +123,10 @@ gs://xwalk-keyboards-01/calibration/history/camera_5056/<runId>.png
 ```
 app/
   main.py               FastAPI HTTP surface (health, calibrate, calibrate-scheduled)
+  cameras.py            Per-camera registry (snapshot source + triage scene description)
   tools.py              Gemini Flash conditions triage + Roboflow stripe/boundary detection
   geometry.py           Camera-agnostic stripe placement (axis, pitch, slot indexing)
+  continuity.py         Run-over-run segment naming continuity (bbox IoU matching)
   persist.py            BigQuery + GCS persistence
   coords.py             Normalized 0-1000 ↔ source pixel conversion, image size sniffing
   storage.py            GCS storage helpers
@@ -140,6 +142,8 @@ docs/
 images/                 Reference frames and comparison images
 tests/
   test_geometry.py      Stripe placement under occlusion and boundary jitter
+  test_continuity.py    Segment names survive occlusion and detection gaps
+  test_cameras.py       Per-camera registry and triage prompt specialization
   compare_variants.py   Head-to-head geometry comparison
   overlay.py            Visual overlay of detected vs reference stripes
   run_local.py          Local calibration runner
@@ -168,7 +172,9 @@ uv sync
 | `ROBOFLOW_API_KEY` | — | Roboflow API key for stripe/boundary detection |
 | `CALIBRATION_STRIPE_WORKFLOW_URL` | Roboflow serverless URL | Stripe detection workflow |
 | `CALIBRATION_BOUNDARY_WORKFLOW_URL` | Roboflow serverless URL | Boundary detection workflow |
-| `CALIBRATION_SNAPSHOT_URL` | `https://511ny.org/map/Cctv/5056` | Camera snapshot URL for scheduled runs |
+| `CALIBRATION_CAMERA_ID` | `5056` | Default camera for scheduled runs without `?cameraId` |
+| `CALIBRATION_SNAPSHOT_URL_TEMPLATE` | `https://511ny.org/map/Cctv/{camera_id}` | Snapshot URL pattern for cameras without an explicit `snapshot_url` in the registry |
+| `CALIBRATION_SNAPSHOT_URL` | — | Legacy override of the default camera's snapshot URL; prefer the registry/template |
 | `CALIBRATION_BUCKET` | `xwalk-keyboards-01` | GCS bucket for calibration data |
 | `CALIBRATION_BQ_TABLE` | `xwalk-keyboards-01.calibration.runs` | BigQuery table for run history |
 | `CALIBRATION_ACCESS_TOKEN` | — | Explicit access token for local development |
@@ -203,6 +209,14 @@ gcloud run deploy xwalk-camera-calibration-agent \
 ```
 
 The Dockerfile uses `uv sync --no-dev` to exclude test dependencies (pytest, Pillow) from the runtime image.
+
+## Adding a camera
+
+The pipeline itself is camera-agnostic; onboarding a camera is configuration:
+
+1. **Register it** in `app/cameras.py` — camera ID, human-readable name, and a one-sentence scene description (what the frame shows when everything is normal; the triage prompt judges frames against it). Cameras on 511NY need no `snapshot_url` — the template derives it from the ID. An unregistered camera still calibrates, with a generic triage prompt.
+2. **Schedule it** — create a Cloud Scheduler job targeting `/api/calibrate-scheduled?cameraId=NNNN`. One job per camera.
+3. **Wire the client** — add the camera to `LIVE_CAMERAS` in xwalk-keyboards (stream URL, segment anchors, reference calibration).
 
 ## Design decisions
 
