@@ -3,9 +3,10 @@
 Every run:
   - Appends one row to BigQuery (the Looker Studio source).
   - Archives the JSON record AND the source frame to GCS history.
-  - On a successful publish (status ok, counts match), overwrites the
-    current/ JSON that the web client reads. The image is never written to
-    current/ — the client only needs polygons.
+  - When the run published (any visible stripes and no boundary-continuity
+    regression — see main.run_calibration), overwrites the current/ JSON that
+    the web client reads. The image is never written to current/ — the client
+    only needs polygons.
 
 GCS layout:
   calibration/
@@ -34,6 +35,24 @@ def _history_path(camera_id: int, run_id: str, ext: str) -> str:
     return f"{GCS_PREFIX}/history/camera_{camera_id}/{run_id}.{ext}"
 
 
+def load_current(camera_id: int) -> dict[str, Any] | None:
+    """The last published calibration for this camera, or None.
+
+    This is the temporal memory for segment continuity: each run compares its
+    detected boundaries against what the web client is currently playing from.
+    Failing soft is deliberate — with no GCS access (local dev) or no prior
+    publish, a run simply behaves like a first sighting.
+    """
+    try:
+        from google.cloud import storage
+
+        bucket = storage.Client().bucket(BUCKET)
+        blob = bucket.blob(_current_path(camera_id))
+        return json.loads(blob.download_as_bytes())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
     """Append to BigQuery, archive to GCS history, and optionally publish.
 
@@ -57,8 +76,6 @@ def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
             "confidence": record.get("confidence"),
             "stripe_count": record.get("stripe_count"),
             "visible_count": record.get("visible_count"),
-            "expected_count": record.get("expected_count"),
-            "count_match": record.get("count_match"),
             "max_confidence": record.get("max_confidence"),
             "min_confidence": record.get("min_confidence"),
             "mean_confidence": record.get("mean_confidence"),
@@ -116,6 +133,10 @@ def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
                 "conditions": record["conditions"],
                 "confidence": record["confidence"],
                 "referenceFrame": record.get("referenceFrame"),
+                # The full segment-keyed map is the forward schema (the web
+                # client prefers it when present); the flattened left/right
+                # aliases remain for older readers.
+                "crosswalks": record.get("crosswalks"),
                 "leftCrosswalk": record.get("leftCrosswalk"),
                 "rightCrosswalk": record.get("rightCrosswalk"),
                 "stripes": record.get("stripes"),

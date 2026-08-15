@@ -199,6 +199,12 @@ def detect_boundaries(image_bytes: bytes) -> dict[str, Any]:
     Boundaries are named by their left-to-right order in the frame rather than
     by fixed pixel ranges, so this works on any camera regardless of where the
     crosswalks sit or how many there are.
+
+    Why the stripe pass wants boundaries at all: the boundary provides an
+    origin that doesn't move when leading stripes are hidden, and a partition
+    when the gap between crosswalks is occluded. Both are memory of what the
+    crosswalk looks like when you can't currently see all of it — everything
+    else in geometry.py can be recovered from the visible stripes alone.
     """
     b64 = base64.b64encode(image_bytes).decode()
 

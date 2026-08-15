@@ -5,11 +5,30 @@ crosswalk "should" have. Given a crosswalk boundary polygon and a set of
 detected stripe polygons, it answers one question: where does each stripe sit
 along the crosswalk?
 
-The answer is an integer slot index measured from the crosswalk's leading edge
-in units of the stripe pitch. Two properties make it usable as a stable
-identity:
+Glossary:
 
-  - It is derived from the boundary, not from the detections, so a stripe
+  boundary       — the crosswalk's outline polygon. Its leading edge is the
+                   origin stripes are counted from.
+  principal axis — the direction the boundary is stretched; the axis the
+                   stripes are spaced along.
+  projection     — a stripe centroid's scalar position along that axis.
+  pitch          — the center-to-center distance between adjacent stripes.
+                   Spacing, as in screw threads — not a musical pitch; this
+                   module knows nothing about notes.
+  phase          — the fractional offset of the whole stripe lattice from the
+                   origin, shared by every stripe.
+  stripeIndex    — how many pitches from the origin a stripe sits. Integer,
+                   0-based, per segment.
+  segment        — which crosswalk a stripe belongs to ("left", "right", ...).
+
+The heuristic in one pass: flatten each stripe polygon to its centroid,
+project the centroids onto the principal axis, take the median gap between
+neighbours as the pitch, count pitches from the boundary's leading edge,
+subtract the shared phase, and round to the nearest slot.
+
+Two properties make the index usable as a stable identity:
+
+  - The origin comes from the boundary, not from the detections, so a stripe
     keeps its index when a car occludes its neighbours.
   - The pitch is the *median* gap between detections, so it survives missing
     stripes (one absent bar makes a single 2x gap; the median ignores it).
@@ -24,8 +43,8 @@ stripe at its leading edge. Sub-pitch noise — the realistic case — is handle
 Consumers should treat the index as a stable relative position rather than an
 absolute anchor.
 
-Indexes are per segment and 0-based. Gaps in the sequence are meaningful: they
-are stripes the model could not see this run.
+Gaps in the index sequence are meaningful: they are stripes the model could
+not see this run.
 """
 
 import math
