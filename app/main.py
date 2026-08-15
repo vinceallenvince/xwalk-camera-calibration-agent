@@ -3,13 +3,13 @@
     GET  /health                   public health check
     POST /api/calibrate            multipart frame -> full calibration record
     POST /api/calibrate-scheduled  no body needed — fetches a frame from the
-                                   web app's snapshot proxy, then runs calibrate
+                                   camera's snapshot source, then calibrates
 
-Cloud Scheduler hits /api/calibrate-scheduled every 15 minutes. Manual runs
-use /api/calibrate with an explicit frame.
+Cloud Scheduler hits /api/calibrate-scheduled on a fixed cadence (see the
+Cloud Scheduler job for the current interval). Manual runs use /api/calibrate
+with an explicit frame.
 """
 
-import json
 import os
 import time
 import uuid
@@ -19,9 +19,10 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+from app.continuity import reconcile_segments
 from app.coords import sniff_image_size
+from app.persist import load_current, save
 from app.tools import analyse_conditions, detect_boundaries, detect_stripes
-from app.persist import save
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 DEFAULT_CAMERA_ID = int(os.environ.get("CALIBRATION_CAMERA_ID", "5056"))
@@ -42,6 +43,146 @@ def _frame_size(image: bytes) -> dict[str, int] | None:
     except Exception:  # noqa: BLE001
         return None
     return {"width": width, "height": height} if width and height else None
+
+
+def _previous_crosswalks(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Boundary polygons from the last published calibration, keyed by segment.
+
+    The current/ schema publishes flattened left/right aliases; newer records
+    may also carry the full `crosswalks` map. Prefer the map so segments
+    beyond left/right keep their identity too.
+    """
+    if not record:
+        return None
+    crosswalks = record.get("crosswalks")
+    if isinstance(crosswalks, dict) and crosswalks:
+        return crosswalks
+
+    flattened = {
+        name: record.get(f"{name}Crosswalk")
+        for name in ("left", "right")
+    }
+    usable = {name: poly for name, poly in flattened.items() if poly}
+    return usable or None
+
+
+def run_calibration(
+    image: bytes,
+    mime: str,
+    camera_id: int,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """The full calibration pipeline, shared by both endpoints.
+
+    Raises whatever analyse_conditions raises — the endpoints translate that
+    into an HTTP error. Detection failures degrade the run instead.
+    """
+    run_id = f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
+    started = time.monotonic()
+
+    # Step 1: Gemini triage
+    conditions_result = analyse_conditions(image, mime_type=mime)
+
+    status = conditions_result.get("status", "degraded")
+    reasoning = conditions_result.get("reasoning")
+    conditions = conditions_result.get("conditions")
+    confidence = conditions_result.get("confidence")
+    gemini_tokens = (conditions_result.get("_usage") or {}).get("totalTokens")
+    model = conditions_result.get("_model")
+
+    # Step 2: Roboflow detection (if crosswalk is visible). Boundaries run
+    # first — they tell the stripe pass which crosswalk each detection belongs
+    # to and where to measure slot positions from — and are then reconciled
+    # against the last published calibration so segment names keep meaning the
+    # same physical crosswalk from run to run. The web client maps names to
+    # fixed pitch anchors; a name that drifted would transpose a keyboard.
+    detection_result: dict[str, Any] | None = None
+    boundary_result: dict[str, Any] | None = None
+    crosswalks: dict[str, Any] = {}
+    continuity: dict[str, Any] | None = None
+    if status not in ("no_crosswalk", "feed_down"):
+        previous = load_current(camera_id)
+
+        try:
+            boundary_result = detect_boundaries(image)
+        except Exception as error:  # noqa: BLE001
+            reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
+            # Non-fatal here: continuity decides below whether the run can
+            # still publish without boundaries.
+
+        detected = (boundary_result or {}).get("crosswalks") or {}
+        crosswalks, continuity = reconcile_segments(detected, _previous_crosswalks(previous))
+
+        if continuity["renamed"]:
+            renames = ", ".join(f"{old}->{new}" for old, new in continuity["renamed"].items())
+            reasoning = (reasoning or "") + f" Segment continuity: renamed {renames} to match the published calibration."
+        if continuity["regression"]:
+            # A crosswalk the client is playing was not found this run. Do not
+            # overwrite the published calibration with a renamed or merged
+            # read — mark the run degraded and hold the last good publish.
+            if status == "ok":
+                status = "degraded"
+            missing = ", ".join(continuity["missing"])
+            reasoning = (reasoning or "") + (
+                f" Boundary continuity: {missing} not detected this run; holding the published calibration."
+            )
+
+        try:
+            detection_result = detect_stripes(image, crosswalks or None)
+        except Exception as error:  # noqa: BLE001
+            reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
+            status = "degraded"
+
+    # Step 3: Determine publishability.
+    #
+    # Gemini has already rejected frames with no crosswalk, so any stripes
+    # Roboflow returns describe real paint. Occlusion varies frame to frame
+    # and a partial read is still a correct read — each stripe carries its own
+    # position, so the client renders what it is given without needing a
+    # complete set. The one exception is a boundary continuity regression:
+    # publishing a run that lost or merged a previously published crosswalk
+    # would rename segments under the client, so those runs are archived but
+    # never promoted to current/.
+    visible = (detection_result or {}).get("visible_count", 0)
+    regression = bool(continuity and continuity["regression"])
+    should_publish = detection_result is not None and visible > 0 and not regression
+    elapsed_ms = round((time.monotonic() - started) * 1000)
+
+    record: dict[str, Any] = {
+        "runId": run_id,
+        "cameraId": camera_id,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "reasoning": reasoning,
+        "conditions": conditions,
+        "confidence": confidence,
+        "referenceFrame": (detection_result or {}).get("referenceFrame") or _frame_size(image),
+        "crosswalks": crosswalks or None,
+        "leftCrosswalk": crosswalks.get("left", []),
+        "rightCrosswalk": crosswalks.get("right", []),
+        "stripes": (detection_result or {}).get("stripes"),
+        "stripe_count": (detection_result or {}).get("stripe_count"),
+        "visible_count": visible,
+        "max_confidence": (detection_result or {}).get("max_confidence"),
+        "min_confidence": (detection_result or {}).get("min_confidence"),
+        "mean_confidence": (detection_result or {}).get("mean_confidence"),
+        "matching_notes": (detection_result or {}).get("segments"),
+        "continuity": continuity,
+        "model": model,
+        "elapsed_ms": elapsed_ms,
+        "gemini_tokens": gemini_tokens,
+        "published": should_publish,
+    }
+    if source:
+        record["source"] = source
+
+    # Step 4: Persist (with the source frame for the archive)
+    try:
+        record["storage"] = save(record, frame=image)
+    except Exception as error:  # noqa: BLE001
+        record["storage"] = {"error": str(error)}
+
+    return record
 
 
 @app.get("/health")
@@ -65,81 +206,11 @@ async def calibrate(
         raise HTTPException(status_code=413, detail="Frame too large")
 
     mime = frame.content_type or "image/png"
-    run_id = f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
-    started = time.monotonic()
 
-    # Step 1: Gemini triage
     try:
-        conditions_result = analyse_conditions(image, mime_type=mime)
+        record = run_calibration(image, mime, cameraId)
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Conditions analysis failed: {error}") from error
-
-    status = conditions_result.get("status", "degraded")
-    reasoning = conditions_result.get("reasoning")
-    conditions = conditions_result.get("conditions")
-    confidence = conditions_result.get("confidence")
-    gemini_tokens = (conditions_result.get("_usage") or {}).get("totalTokens")
-    model = conditions_result.get("_model")
-
-    # Step 2: Roboflow detection (if crosswalk is visible). Boundaries run
-    # first — they tell the stripe pass which crosswalk each detection belongs
-    # to and where to measure slot positions from.
-    detection_result: dict[str, Any] | None = None
-    boundary_result: dict[str, Any] | None = None
-    if status not in ("no_crosswalk", "feed_down"):
-        try:
-            boundary_result = detect_boundaries(image)
-        except Exception as error:  # noqa: BLE001
-            reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
-            # Non-fatal: stripes are still indexed, off their own extent.
-
-        try:
-            detection_result = detect_stripes(image, (boundary_result or {}).get("crosswalks"))
-        except Exception as error:  # noqa: BLE001
-            reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
-            status = "degraded"
-
-    # Step 3: Determine publishability.
-    #
-    # Gemini has already rejected frames with no crosswalk, so any stripes
-    # Roboflow returns describe real paint. Publish them. Occlusion varies
-    # frame to frame and a partial read is still a correct read — each stripe
-    # carries its own position, so the client renders what it is given without
-    # needing a complete set.
-    visible = (detection_result or {}).get("visible_count", 0)
-    should_publish = detection_result is not None and visible > 0
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-
-    record: dict[str, Any] = {
-        "runId": run_id,
-        "cameraId": cameraId,
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-        "status": status,
-        "reasoning": reasoning,
-        "conditions": conditions,
-        "confidence": confidence,
-        "referenceFrame": (detection_result or {}).get("referenceFrame") or _frame_size(image),
-        "crosswalks": (boundary_result or {}).get("crosswalks"),
-        "leftCrosswalk": (boundary_result or {}).get("leftCrosswalk"),
-        "rightCrosswalk": (boundary_result or {}).get("rightCrosswalk"),
-        "stripes": (detection_result or {}).get("stripes"),
-        "stripe_count": (detection_result or {}).get("stripe_count"),
-        "visible_count": visible,
-        "max_confidence": (detection_result or {}).get("max_confidence"),
-        "min_confidence": (detection_result or {}).get("min_confidence"),
-        "mean_confidence": (detection_result or {}).get("mean_confidence"),
-        "matching_notes": (detection_result or {}).get("segments"),
-        "model": model,
-        "elapsed_ms": elapsed_ms,
-        "gemini_tokens": gemini_tokens,
-        "published": should_publish,
-    }
-
-    # Step 4: Persist (with the source frame for the archive)
-    try:
-        record["storage"] = save(record, frame=image)
-    except Exception as error:  # noqa: BLE001
-        record["storage"] = {"error": str(error)}
 
     return JSONResponse(record)
 
@@ -152,11 +223,11 @@ SNAPSHOT_URL = os.environ.get(
 
 @app.post("/api/calibrate-scheduled")
 async def calibrate_scheduled(request: Request) -> JSONResponse:
-    """Scheduled entry point — fetches a frame from the web app's snapshot proxy,
-    then runs the same calibration pipeline as /api/calibrate.
+    """Scheduled entry point — fetches the current camera frame from 511NY
+    (CALIBRATION_SNAPSHOT_URL), then runs the same calibration pipeline as
+    /api/calibrate.
 
-    Cloud Scheduler calls this with no body. The snapshot proxy returns the
-    current 511NY camera image for View 5056.
+    Cloud Scheduler calls this with no body.
     """
     if API_KEY and request.headers.get("x-api-key") != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
@@ -175,72 +246,11 @@ async def calibrate_scheduled(request: Request) -> JSONResponse:
     if not image or len(image) < 1000:
         raise HTTPException(status_code=502, detail="Camera frame is empty or too small")
 
-    camera_id = DEFAULT_CAMERA_ID
-    run_id = f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
-    started = time.monotonic()
     mime = "image/png" if "png" in content_type else "image/jpeg"
 
-    # Step 1: Gemini triage
     try:
-        conditions_result = analyse_conditions(image, mime_type=mime)
+        record = run_calibration(image, mime, DEFAULT_CAMERA_ID, source="scheduled")
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Conditions analysis failed: {error}") from error
-
-    status = conditions_result.get("status", "degraded")
-    reasoning = conditions_result.get("reasoning")
-    conditions = conditions_result.get("conditions")
-    confidence = conditions_result.get("confidence")
-    gemini_tokens = (conditions_result.get("_usage") or {}).get("totalTokens")
-    model = conditions_result.get("_model")
-
-    # Step 2: Roboflow detection — boundaries first, same as /api/calibrate.
-    detection_result: dict[str, Any] | None = None
-    boundary_result: dict[str, Any] | None = None
-    if status not in ("no_crosswalk", "feed_down"):
-        try:
-            boundary_result = detect_boundaries(image)
-        except Exception as error:  # noqa: BLE001
-            reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
-
-        try:
-            detection_result = detect_stripes(image, (boundary_result or {}).get("crosswalks"))
-        except Exception as error:  # noqa: BLE001
-            reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
-            status = "degraded"
-
-    visible = (detection_result or {}).get("visible_count", 0)
-    should_publish = detection_result is not None and visible > 0
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-
-    record: dict[str, Any] = {
-        "runId": run_id,
-        "cameraId": camera_id,
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-        "status": status,
-        "reasoning": reasoning,
-        "conditions": conditions,
-        "confidence": confidence,
-        "referenceFrame": (detection_result or {}).get("referenceFrame") or _frame_size(image),
-        "crosswalks": (boundary_result or {}).get("crosswalks"),
-        "leftCrosswalk": (boundary_result or {}).get("leftCrosswalk"),
-        "rightCrosswalk": (boundary_result or {}).get("rightCrosswalk"),
-        "stripes": (detection_result or {}).get("stripes"),
-        "stripe_count": (detection_result or {}).get("stripe_count"),
-        "visible_count": visible,
-        "max_confidence": (detection_result or {}).get("max_confidence"),
-        "min_confidence": (detection_result or {}).get("min_confidence"),
-        "mean_confidence": (detection_result or {}).get("mean_confidence"),
-        "matching_notes": (detection_result or {}).get("segments"),
-        "model": model,
-        "elapsed_ms": elapsed_ms,
-        "gemini_tokens": gemini_tokens,
-        "published": should_publish,
-        "source": "scheduled",
-    }
-
-    try:
-        record["storage"] = save(record, frame=image)
-    except Exception as error:  # noqa: BLE001
-        record["storage"] = {"error": str(error)}
 
     return JSONResponse(record)
