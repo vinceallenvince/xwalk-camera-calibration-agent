@@ -3,11 +3,14 @@
     GET  /health                   public health check
     POST /api/calibrate            multipart frame -> full calibration record
     POST /api/calibrate-scheduled  no body needed — fetches a frame from the
-                                   camera's snapshot source, then calibrates
+                                   camera's snapshot source, then calibrates.
+                                   Takes ?cameraId=NNNN; defaults to
+                                   CALIBRATION_CAMERA_ID.
 
 Cloud Scheduler hits /api/calibrate-scheduled on a fixed cadence (see the
-Cloud Scheduler job for the current interval). Manual runs use /api/calibrate
-with an explicit frame.
+Cloud Scheduler job for the current interval) — one job per camera, each
+addressing its camera via the cameraId query parameter. Manual runs use
+/api/calibrate with an explicit frame.
 """
 
 import os
@@ -19,6 +22,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+from app.cameras import camera_config
 from app.continuity import reconcile_segments
 from app.coords import sniff_image_size
 from app.persist import load_current, save
@@ -79,9 +83,10 @@ def run_calibration(
     """
     run_id = f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}"
     started = time.monotonic()
+    camera = camera_config(camera_id)
 
-    # Step 1: Gemini triage
-    conditions_result = analyse_conditions(image, mime_type=mime)
+    # Step 1: Gemini triage, judged against this camera's registered scene
+    conditions_result = analyse_conditions(image, camera, mime_type=mime)
 
     status = conditions_result.get("status", "degraded")
     reasoning = conditions_result.get("reasoning")
@@ -215,28 +220,36 @@ async def calibrate(
     return JSONResponse(record)
 
 
-SNAPSHOT_URL = os.environ.get(
-    "CALIBRATION_SNAPSHOT_URL",
-    "https://511ny.org/map/Cctv/5056",
-)
+# Legacy single-camera override, honored for the default camera only. New
+# cameras get their snapshot URL from app/cameras.py (registry or template).
+SNAPSHOT_URL_OVERRIDE = os.environ.get("CALIBRATION_SNAPSHOT_URL")
+
+
+def snapshot_url_for(camera_id: int) -> str:
+    if SNAPSHOT_URL_OVERRIDE and camera_id == DEFAULT_CAMERA_ID:
+        return SNAPSHOT_URL_OVERRIDE
+    return camera_config(camera_id).frame_url
 
 
 @app.post("/api/calibrate-scheduled")
-async def calibrate_scheduled(request: Request) -> JSONResponse:
-    """Scheduled entry point — fetches the current camera frame from 511NY
-    (CALIBRATION_SNAPSHOT_URL), then runs the same calibration pipeline as
-    /api/calibrate.
+async def calibrate_scheduled(request: Request, cameraId: int | None = None) -> JSONResponse:
+    """Scheduled entry point — fetches the current frame from the camera's
+    snapshot source, then runs the same calibration pipeline as /api/calibrate.
 
-    Cloud Scheduler calls this with no body.
+    Cloud Scheduler calls this with no body, one job per camera, addressing
+    the camera with ?cameraId=NNNN. Omitting it calibrates the default camera
+    (CALIBRATION_CAMERA_ID), which keeps the original single-camera job valid.
     """
     if API_KEY and request.headers.get("x-api-key") != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    camera_id = cameraId if cameraId is not None else DEFAULT_CAMERA_ID
 
     import httpx
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(SNAPSHOT_URL)
+            resp = await client.get(snapshot_url_for(camera_id))
             resp.raise_for_status()
             image = resp.content
             content_type = resp.headers.get("content-type", "image/jpeg")
@@ -249,7 +262,7 @@ async def calibrate_scheduled(request: Request) -> JSONResponse:
     mime = "image/png" if "png" in content_type else "image/jpeg"
 
     try:
-        record = run_calibration(image, mime, DEFAULT_CAMERA_ID, source="scheduled")
+        record = run_calibration(image, mime, camera_id, source="scheduled")
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Conditions analysis failed: {error}") from error
 
