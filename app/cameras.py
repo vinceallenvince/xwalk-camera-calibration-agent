@@ -30,6 +30,12 @@ class CameraConfig:
     scene: str
     # Explicit snapshot source; cameras on the 511NY template can omit it.
     snapshot_url: str | None = None
+    # How many painted crosswalks this camera actually shows. Occlusion can
+    # split one crosswalk into multiple detected boundaries; capping to the
+    # known count keeps those fragments from being published as phantom
+    # segments that boundary continuity would then demand forever. None means
+    # unknown — publish whatever the detector finds.
+    expected_crosswalks: int | None = None
 
     @property
     def frame_url(self) -> str:
@@ -41,6 +47,7 @@ CAMERAS: dict[int, CameraConfig] = {
         camera_id=5056,
         name="511NY View 5056 (West Street at W. 34 St, Manhattan)",
         scene="This camera shows two crosswalks separated by a bollard median.",
+        expected_crosswalks=2,
     ),
 }
 

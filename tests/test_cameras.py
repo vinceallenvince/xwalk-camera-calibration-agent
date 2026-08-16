@@ -25,6 +25,14 @@ class TestRegistry:
         assert "9999" in config.name
         assert config.frame_url == "https://511ny.org/map/Cctv/9999"
 
+    def test_registered_camera_declares_its_crosswalk_count(self):
+        assert camera_config(5056).expected_crosswalks == 2
+
+    def test_unregistered_camera_has_no_crosswalk_cap(self):
+        """Unknown cameras publish whatever the detector finds — a cap only
+        makes sense once someone has looked at the scene and counted."""
+        assert camera_config(9999).expected_crosswalks is None
+
     def test_explicit_snapshot_url_wins_over_the_template(self):
         config = CameraConfig(
             camera_id=1, name="test cam", scene="a scene",

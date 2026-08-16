@@ -208,12 +208,29 @@ def _segment_name(position: int) -> str:
     return f"segment{position + 1}"
 
 
-def detect_boundaries(image_bytes: bytes) -> dict[str, Any]:
+def largest_boundaries(detections: list[dict], count: int | None) -> list[dict]:
+    """Keep the `count` largest detections by bounding-box area, in x order.
+
+    Occlusion can split one crosswalk into multiple detected boundaries — a
+    truck parked mid-crosswalk leaves two disconnected patches of paint, and
+    each becomes its own detection. When the camera's real crosswalk count is
+    known, everything beyond it is a fragment: keep the largest boundaries
+    (a fragment is always smaller than the crosswalk it broke off of) and
+    drop the rest, so a phantom segment can never be published.
+    """
+    if count is None or len(detections) <= count:
+        return detections
+    kept = sorted(detections, key=lambda d: -(d.get("width", 0) * d.get("height", 0)))[:count]
+    return sorted(kept, key=lambda d: d["x"])
+
+
+def detect_boundaries(image_bytes: bytes, max_crosswalks: int | None = None) -> dict[str, Any]:
     """Detect the crosswalk boundary polygons using Roboflow.
 
     Boundaries are named by their left-to-right order in the frame rather than
     by fixed pixel ranges, so this works on any camera regardless of where the
-    crosswalks sit or how many there are.
+    crosswalks sit or how many there are. `max_crosswalks` is the camera's
+    registered crosswalk count — see largest_boundaries.
 
     Why the stripe pass wants boundaries at all: the boundary provides an
     origin that doesn't move when leading stripes are hidden, and a partition
@@ -239,6 +256,7 @@ def detect_boundaries(image_bytes: bytes) -> dict[str, Any]:
         [p for p in preds if p.get("confidence", 0) >= BOUNDARY_MIN_CONFIDENCE and p.get("width", 0) >= BOUNDARY_MIN_WIDTH],
         key=lambda p: p["x"],
     )
+    real = largest_boundaries(real, max_crosswalks)
 
     crosswalks: dict[str, list[list[float]]] = {}
     for position, det in enumerate(real):
