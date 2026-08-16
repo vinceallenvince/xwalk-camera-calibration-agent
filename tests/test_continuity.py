@@ -37,7 +37,7 @@ class TestFirstSighting:
         detected = {"left": LEFT, "right": RIGHT}
         reconciled, report = reconcile_segments(detected, None)
         assert reconciled == detected
-        assert report == {"regression": False, "missing": [], "renamed": {}}
+        assert report == {"regression": False, "missing": [], "renamed": {}, "retired": []}
 
     def test_empty_previous_passes_names_through(self):
         reconciled, report = reconcile_segments({"left": LEFT}, {})
@@ -51,7 +51,7 @@ class TestContinuity:
         detected = {"left": nudge(LEFT), "right": nudge(RIGHT)}
         reconciled, report = reconcile_segments(detected, previous)
         assert set(reconciled) == {"left", "right"}
-        assert report == {"regression": False, "missing": [], "renamed": {}}
+        assert report == {"regression": False, "missing": [], "renamed": {}, "retired": []}
 
     def test_missing_left_boundary_does_not_rename_the_right(self):
         """The bug this module exists to prevent: a truck hides the left
@@ -111,3 +111,64 @@ class TestContinuity:
         reconciled, report = reconcile_segments({"left": nudge(LEFT)}, {"left": LEFT})
         assert set(reconciled) == {"left"}
         assert report["regression"] is False
+
+
+# Two fragments of RIGHT, as an occlusion-split publishes them: a truck across
+# the paint leaves two disconnected patches, each detected as its own boundary.
+RIGHT_BIG_FRAGMENT = [[320, 132], [350, 137], [350, 155], [325, 150]]
+RIGHT_SMALL_FRAGMENT = [[291, 132], [315, 136], [314, 150], [292, 148]]
+
+
+class TestPhantomRetirement:
+    """The published baseline can carry phantom segments: fragments of one
+    occlusion-split crosswalk, published before the detection cap existed. A
+    capped detection pass can never match a phantom again, so counting its
+    absence as missing holds every future publish — the 2026-08-16 camera
+    5056 deadlock, where 'segment3 not detected; holding' repeated for 40+
+    consecutive runs. The camera's registered crosswalk count must bound the
+    baseline exactly as it bounds detections."""
+
+    def test_phantom_beyond_the_cap_is_retired_not_missing(self):
+        """The deadlock scenario: a three-segment baseline (left + two
+        fragments of the right crosswalk), a clean two-boundary detection.
+        The smallest baseline segment retires; the full right crosswalk
+        adopts the surviving fragment's name; the run publishes."""
+        previous = {
+            "left": LEFT,
+            "right": RIGHT_BIG_FRAGMENT,
+            "segment3": RIGHT_SMALL_FRAGMENT,
+        }
+        detected = {"left": nudge(LEFT), "right": RIGHT}
+
+        reconciled, report = reconcile_segments(detected, previous, expected_segments=2)
+
+        assert reconciled == {"left": nudge(LEFT), "right": RIGHT}
+        assert report["regression"] is False
+        assert report["missing"] == []
+        assert report["retired"] == ["segment3"]
+
+    def test_real_disappearance_is_still_a_regression_under_the_cap(self):
+        """Retirement must not weaken the hold it coexists with: a baseline
+        at the registered count loses nothing to the cap, so a genuinely
+        hidden crosswalk still holds the publish."""
+        previous = {"left": LEFT, "right": RIGHT}
+        detected = {"left": nudge(RIGHT)}  # left hidden; positional name wrong
+
+        reconciled, report = reconcile_segments(detected, previous, expected_segments=2)
+
+        assert reconciled == {"right": nudge(RIGHT)}
+        assert report["regression"] is True
+        assert report["missing"] == ["left"]
+        assert report["retired"] == []
+
+    def test_no_registered_count_keeps_the_hold(self):
+        """Unknown cameras have no count to retire against — a baseline
+        segment that goes unmatched is a regression, as before."""
+        previous = {"left": LEFT, "right": RIGHT, "segment3": RIGHT_SMALL_FRAGMENT}
+        detected = {"left": nudge(LEFT), "right": nudge(RIGHT)}
+
+        reconciled, report = reconcile_segments(detected, previous)
+
+        assert report["regression"] is True
+        assert report["missing"] == ["segment3"]
+        assert report["retired"] == []

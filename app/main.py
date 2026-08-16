@@ -116,8 +116,20 @@ def run_calibration(
             # still publish without boundaries.
 
         detected = (boundary_result or {}).get("crosswalks") or {}
-        crosswalks, continuity = reconcile_segments(detected, _previous_crosswalks(previous))
+        crosswalks, continuity = reconcile_segments(
+            detected, _previous_crosswalks(previous), camera.expected_crosswalks,
+        )
 
+        if continuity["retired"]:
+            # The published baseline carried more segments than the camera has
+            # crosswalks — phantoms from an occlusion-split, published before
+            # the detection cap. They are dropped from the baseline rather
+            # than counted as missing, or they would hold publishes forever.
+            names = ", ".join(continuity["retired"])
+            reasoning = (reasoning or "") + (
+                f" Boundary continuity: retired phantom {names} — the registered"
+                f" crosswalk count is {camera.expected_crosswalks}."
+            )
         if continuity["renamed"]:
             renames = ", ".join(f"{old}->{new}" for old, new in continuity["renamed"].items())
             reasoning = (reasoning or "") + f" Segment continuity: renamed {renames} to match the published calibration."
