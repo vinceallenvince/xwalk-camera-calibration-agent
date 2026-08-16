@@ -18,7 +18,7 @@ ADK Agent (Cloud Run)
   ├─ if status is ok or degraded:
   │
   ├─ 2. Roboflow Workflow  — detect the stripes
-  │     Returns: 25 instance-segmentation polygons, paint-accurate
+  │     Returns: N instance-segmentation polygons, paint-accurate
   │
   ├─ 3. Code: match detected polygons to reference stripeIndex/note
   │     by left-to-right order within each segment
