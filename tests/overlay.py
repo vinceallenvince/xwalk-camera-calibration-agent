@@ -1,10 +1,12 @@
-"""Draw a run's polygons over the source frame so they can be confirmed by eye.
+"""Draw an archived run's polygons over its source frame for eyeball checks.
 
-    uv run python tests/overlay.py images/videoframe_872991.png out/<run>.json
+    uv run python tests/overlay.py images/videoframe_872991-no-occlusion.png out/<run>.json
 
-Reference geometry is drawn in dim blue, the model's answer in mint, and any
-stripe reported not-visible is listed in the caption. Output is upscaled so the
-352 x 240 source is actually inspectable.
+Works on the records the agent publishes and archives (the GCS history pairs
+of <runId>.json + <runId>.png): crosswalk boundaries are drawn in amber and
+stripes in mint, each labelled with its stripeIndex. Coordinates are scaled
+from the record's referenceFrame, so a frame grabbed at a different resolution
+still lines up. Output is upscaled so a 352 x 240 source is inspectable.
 """
 
 import json
@@ -13,18 +15,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app.reference import REFERENCE_CALIBRATION  # noqa: E402
-
 SCALE = 4
-REFERENCE_COLOR = (90, 140, 255)
-RETURNED_COLOR = (148, 215, 181)
+STRIPE_COLOR = (148, 215, 181)
 CROSSWALK_COLOR = (255, 190, 90)
-
-
-def _scaled(polygon):
-    return [(p[0] * SCALE, p[1] * SCALE) for p in polygon]
 
 
 def main() -> int:
@@ -39,38 +32,51 @@ def main() -> int:
     canvas = base.resize((base.width * SCALE, base.height * SCALE), Image.NEAREST)
     draw = ImageDraw.Draw(canvas, "RGBA")
 
-    # Reference stripes, dim, for comparison.
-    for stripe in REFERENCE_CALIBRATION["stripes"]:
-        draw.polygon(_scaled(stripe["polygon"]), outline=(*REFERENCE_COLOR, 200))
+    reference = record.get("referenceFrame") or {}
+    sx = canvas.width / reference.get("width", base.width)
+    sy = canvas.height / reference.get("height", base.height)
 
-    # Returned crosswalk quads.
-    for key in ("leftCrosswalk", "rightCrosswalk"):
-        polygon = record.get(key) or []
+    def scaled(polygon):
+        return [(p[0] * sx, p[1] * sy) for p in polygon]
+
+    # Crosswalk boundaries: the segment map, falling back to the flat aliases
+    # older records carry.
+    crosswalks = record.get("crosswalks") or {
+        "left": record.get("leftCrosswalk") or [],
+        "right": record.get("rightCrosswalk") or [],
+    }
+    for polygon in crosswalks.values():
         if len(polygon) >= 3:
-            draw.polygon(_scaled(polygon), outline=(*CROSSWALK_COLOR, 255))
+            draw.polygon(scaled(polygon), outline=(*CROSSWALK_COLOR, 255))
 
-    # Returned stripes, filled so occupancy is obvious.
-    invisible = []
-    for stripe in record.get("stripes", []):
+    per_segment: dict[str, list[int]] = {}
+    for stripe in record.get("stripes") or []:
         polygon = stripe.get("polygon") or []
-        if not stripe.get("visible") or len(polygon) < 3:
-            invisible.append(f"{stripe.get('stripeIndex')} {stripe.get('note')}")
+        if len(polygon) < 3:
             continue
-        points = _scaled(polygon)
-        draw.polygon(points, fill=(*RETURNED_COLOR, 90), outline=(*RETURNED_COLOR, 255))
+        points = scaled(polygon)
+        draw.polygon(points, fill=(*STRIPE_COLOR, 90), outline=(*STRIPE_COLOR, 255))
         cx = sum(p[0] for p in points) / len(points)
         cy = sum(p[1] for p in points) / len(points)
-        draw.text((cx - 6, cy - 4), str(stripe.get("stripeIndex")), fill=(255, 255, 255))
+        index = stripe.get("stripeIndex")
+        draw.text((cx - 6, cy - 4), str(index), fill=(255, 255, 255))
+        if index is not None:
+            per_segment.setdefault(stripe.get("segment", "?"), []).append(index)
 
     out = Path(sys.argv[2]).with_suffix(".overlay.png")
     canvas.save(out)
 
     print(f"wrote {out}  ({canvas.width} x {canvas.height})")
-    print(f"status     : {record.get('status')}  confidence {record.get('confidence')}")
-    print(f"reasoning  : {record.get('reasoning')}")
-    print(f"metrics    : {record.get('validation', {}).get('metrics')}")
-    print(f"not visible: {invisible or 'none'}")
-    print("legend     : blue = reference stripes, mint = returned stripes, amber = returned crosswalk quads")
+    print(f"status    : {record.get('status')}  confidence {record.get('confidence')}")
+    print(f"reasoning : {record.get('reasoning')}")
+    for name in sorted(per_segment):
+        indexes = sorted(per_segment[name])
+        gaps = sorted(set(range(indexes[0], indexes[-1] + 1)) - set(indexes))
+        print(
+            f"{name:<9} : {len(indexes)} stripes, "
+            f"indexes {indexes[0]}-{indexes[-1]}, hidden {gaps or 'none'}"
+        )
+    print("legend    : mint = stripes (stripeIndex labelled), amber = crosswalk boundaries")
     return 0
 
 
