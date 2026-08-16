@@ -39,6 +39,11 @@ def _bbox(polygon: Polygon) -> tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _bbox_area(polygon: Polygon) -> float:
+    left, top, right, bottom = _bbox(polygon)
+    return (right - left) * (bottom - top)
+
+
 def bbox_iou(a: Polygon, b: Polygon) -> float:
     """Intersection-over-union of the polygons' axis-aligned bounding boxes."""
     if len(a) < 3 or len(b) < 3:
@@ -77,6 +82,7 @@ def _next_free_name(taken: set[str]) -> str:
 def reconcile_segments(
     detected: dict[str, Polygon],
     previous: dict[str, Polygon] | None,
+    expected_segments: int | None = None,
 ) -> tuple[dict[str, Polygon], dict[str, Any]]:
     """Carry segment names forward from the previous published calibration.
 
@@ -88,14 +94,33 @@ def reconcile_segments(
                     empty). The caller should hold the previous publish.
       missing     — the previous segment names that went unmatched.
       renamed     — positional name → adopted previous name, for the log.
+      retired     — previous segments dropped from the baseline because they
+                    exceed the camera's registered crosswalk count.
+
+    `expected_segments` is that registered count (see CameraConfig). It bounds
+    the *baseline* exactly as it bounds detections: the published calibration
+    can carry phantom segments — fragments of one occlusion-split crosswalk,
+    published before the detection cap existed — and a phantom can never be
+    matched by a capped detection pass. Counting its absence as missing would
+    hold every future publish (the deadlock observed on camera 5056,
+    2026-08-16). Keep the largest `expected_segments` boundaries as the
+    baseline — a fragment is always smaller than a real crosswalk — and
+    retire the rest without regression.
 
     With no previous calibration the detected names pass through untouched —
     a first sighting has nothing to stay consistent with.
     """
     if not previous:
-        return dict(detected), {"regression": False, "missing": [], "renamed": {}}
+        return dict(detected), {"regression": False, "missing": [], "renamed": {}, "retired": []}
 
     usable_previous = {name: poly for name, poly in previous.items() if len(poly) >= 3}
+
+    retired: list[str] = []
+    if expected_segments is not None and len(usable_previous) > expected_segments:
+        largest = sorted(usable_previous, key=lambda name: -_bbox_area(usable_previous[name]))
+        keep = set(largest[:expected_segments])
+        retired = sorted(set(usable_previous) - keep)
+        usable_previous = {name: poly for name, poly in usable_previous.items() if name in keep}
 
     # Score every detected/previous pairing, best overlap first, one-to-one.
     scored = sorted(
@@ -139,4 +164,5 @@ def reconcile_segments(
         "regression": len(missing) > 0,
         "missing": missing,
         "renamed": renamed,
+        "retired": retired,
     }

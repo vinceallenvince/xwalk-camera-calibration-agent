@@ -33,8 +33,9 @@ class CameraConfig:
     # How many painted crosswalks this camera actually shows. Occlusion can
     # split one crosswalk into multiple detected boundaries; capping to the
     # known count keeps those fragments from being published as phantom
-    # segments that boundary continuity would then demand forever. None means
-    # unknown — publish whatever the detector finds.
+    # segments. Continuity applies the same cap to the published baseline,
+    # retiring any phantom already in it so it cannot hold future publishes.
+    # None means unknown — publish whatever the detector finds.
     expected_crosswalks: int | None = None
 
     @property

@@ -171,6 +171,15 @@ The continuity check produces three signals:
 | `renamed` | A detected boundary was matched to a previous segment with a different positional name — it adopts the previous name |
 | `missing` | Previous segment names that went unmatched this run |
 | `regression` | A previously published crosswalk was not found — the caller holds the previous publish instead of overwriting it |
+| `retired` | Previous segments dropped from the baseline because they exceed the camera's registered crosswalk count — phantoms from an occlusion-split, published before the detection cap existed |
+
+The registered crosswalk count bounds the **baseline** exactly as it bounds
+detections. A phantom segment in the published calibration can never be
+matched by a capped detection pass, so counting its absence as missing would
+hold every future publish — the baseline would defend the phantom forever.
+Retirement keeps the largest `expected_crosswalks` baseline boundaries (a
+fragment is always smaller than the crosswalk it broke off of) and lets the
+run publish.
 
 ### Stage 4: Roboflow stripe detection + geometry placement
 
