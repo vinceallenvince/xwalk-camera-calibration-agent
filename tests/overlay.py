@@ -1,6 +1,6 @@
 """Draw a run's polygons over the source frame so they can be confirmed by eye.
 
-    uv run python tests/overlay.py images/videoframe_872991.png out/<run>.json
+    uv run python tests/overlay.py images/videoframe_872991-no-occlusion.png out/<run>.json
 
 Reference geometry is drawn in dim blue, the model's answer in mint, and any
 stripe reported not-visible is listed in the caption. Output is upscaled so the
