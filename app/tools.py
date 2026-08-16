@@ -46,16 +46,20 @@ _CONDITIONS_SCHEMA: dict[str, Any] = {
     "properties": {
         "status": {
             "type": "STRING",
-            "enum": ["ok", "degraded", "no_crosswalk", "feed_down", "needs_review"],
+            "enum": ["ok", "degraded", "no_crosswalk", "feed_down"],
         },
         "conditions": {
             "type": "OBJECT",
-            "required": ["crosswalkVisible", "obstruction", "cameraMoved", "repaintSuspected"],
+            "required": ["crosswalkVisible", "occlusion", "visibility", "cameraMoved", "repaintSuspected"],
             "properties": {
                 "crosswalkVisible": {"type": "BOOLEAN"},
-                "obstruction": {
+                "occlusion": {
                     "type": "STRING",
-                    "enum": ["none", "snow", "vehicle", "construction", "glare", "darkness", "other"],
+                    "enum": ["none", "vehicle", "construction", "snow_cover", "debris", "other"],
+                },
+                "visibility": {
+                    "type": "STRING",
+                    "enum": ["clear", "shadows", "dusk", "glare", "rain", "snowfall", "fog", "dark", "other"],
                 },
                 "cameraMoved": {"type": "STRING", "enum": ["none", "slight", "significant"]},
                 "repaintSuspected": {"type": "BOOLEAN"},
@@ -70,8 +74,8 @@ def conditions_instruction(camera: CameraConfig) -> str:
     """The triage system prompt, specialized to one camera's scene.
 
     The scene description is the yardstick the model classifies against — a
-    frame is "ok" when it matches the registered scene, "needs_review" when
-    it doesn't. Judging a new camera against another camera's scene would
+    frame is "ok" when it matches the registered scene, "degraded" when it
+    doesn't. Judging a new camera against another camera's scene would
     flag a perfectly good view, which is why this is per-camera config
     rather than a module constant.
     """
@@ -83,19 +87,44 @@ Given a current frame, classify its condition:
 
 status:
   ok            — the crosswalks in view are clearly visible, normal conditions
-  degraded      — crosswalks are visible but partially obstructed or image quality
-                  is reduced (vehicles, rain, glare, darkness)
-  no_crosswalk  — the camera has been re-aimed away from the intersection, or the
-                  crosswalks are completely invisible (whiteout, total obstruction)
+  degraded      — crosswalks are visible but conditions are reduced: partial
+                  occlusion, shadows across the paint, dusk light, glare, rain,
+                  or a view that does not match the scene described above
+  no_crosswalk  — no painted crosswalk is visible at all: the camera is aimed
+                  somewhere without a crosswalk in frame, or a whiteout/total
+                  obstruction hides everything
   feed_down     — this is a known outage placeholder image (text saying "camera
                   being serviced" or "no live camera feed"), NOT a real camera frame
-  needs_review  — the camera appears to have been significantly repositioned, or
-                  the crosswalk has been repainted/reconfigured
+
+If the camera appears re-aimed but painted crosswalks are still visible, report
+"degraded" with cameraMoved "significant" and explain in reasoning — do NOT
+report "no_crosswalk" while paint is in view.
 
 conditions.crosswalkVisible: can you see painted crosswalk stripes at all?
-conditions.obstruction: the dominant thing degrading the view, if any.
+
+conditions.occlusion: the dominant thing physically covering any of the painted
+  stripes, if any. A vehicle on the paint — stopped or passing — is "vehicle";
+  snow lying on the paint is "snow_cover". Report it even when status is "ok":
+  a single car crossing the paint in an otherwise normal frame is occlusion
+  "vehicle" with status "ok".
+
+conditions.visibility: the dominant lighting or atmospheric factor reducing
+  paint contrast, judged independently of occlusion:
+    clear    — paint contrast is good; a streetlit night scene with crisp
+               stripes is "clear", not "dark"
+    shadows  — strong shadows fall across the crosswalk (trees, buildings,
+               low-angle sun); these cut stripe contrast even on sunny days
+    dusk     — twilight: the sun is down or nearly down and street lighting
+               is not yet dominant; the scene is flat and low-contrast
+    glare    — sun or headlights washing out part of the view
+    rain / snowfall / fog — precipitation or haze degrading the image
+    dark     — genuinely underlit; stripes barely distinguishable
+  Report the factor even when status is "ok" — this field feeds a dashboard
+  correlating conditions with detection quality.
+
 conditions.cameraMoved: "none" if the view is normal, "slight" for ordinary
   thermal drift, "significant" for an apparent physical re-aim.
+
 conditions.repaintSuspected: true if the paint looks freshly re-striped.
 
 confidence: 0.0-1.0, your honest confidence in the classification.
@@ -103,8 +132,8 @@ confidence: 0.0-1.0, your honest confidence in the classification.
 reasoning: why this status. MAXIMUM {REASONING_MAX_CHARS} CHARACTERS. Specific
 and terse. Operators and a dashboard read this.
 
-Be conservative: prefer "degraded" over "ok" when uncertain, and "needs_review"
-over "ok" when the camera appears moved significantly.
+Be conservative: prefer "degraded" over "ok" when uncertain, especially when
+shadows or dusk light fall on the painted area.
 """
 
 _GEMINI_CLIENT: genai.Client | None = None

@@ -50,7 +50,7 @@ class TestTriagePrompt:
     def test_unregistered_camera_is_not_judged_against_5056s_scene(self):
         """The bug this module exists to prevent: a single-crosswalk camera
         triaged against "two crosswalks separated by a bollard median" would
-        be flagged needs_review for matching its own scene."""
+        be flagged degraded for matching its own scene."""
         prompt = conditions_instruction(camera_config(4321))
         assert "5056" not in prompt
         assert "bollard" not in prompt
@@ -58,8 +58,27 @@ class TestTriagePrompt:
 
     def test_prompt_keeps_the_status_contract(self):
         prompt = conditions_instruction(camera_config(4321))
-        for status in ("ok", "degraded", "no_crosswalk", "feed_down", "needs_review"):
+        for status in ("ok", "degraded", "no_crosswalk", "feed_down"):
             assert status in prompt
+        assert "needs_review" not in prompt
+
+    def test_prompt_separates_occlusion_from_visibility(self):
+        """Dusk and shadows hurt stripe detection more than parked cars do.
+        The prompt must give the model language for lighting, independent of
+        physical occlusion, and must not treat a streetlit night as dark."""
+        prompt = conditions_instruction(camera_config(5056))
+        assert "conditions.occlusion" in prompt
+        assert "conditions.visibility" in prompt
+        for factor in ("shadows", "dusk", "glare"):
+            assert factor in prompt
+        assert "streetlit" in prompt
+
+    def test_prompt_routes_a_reaim_with_visible_paint_to_degraded(self):
+        """A re-aimed camera still showing crosswalks is degraded, not
+        no_crosswalk — publishing stays gated on detection, and operators
+        read the cameraMoved field."""
+        prompt = conditions_instruction(camera_config(5056))
+        assert 'do NOT\nreport "no_crosswalk" while paint is in view' in prompt
 
 
 class TestScheduledSnapshotUrl:

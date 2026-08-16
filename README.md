@@ -73,10 +73,13 @@ Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY` is
 | Status | Meaning | Publishes? |
 |--------|---------|------------|
 | `ok` | The crosswalks in view are clearly visible, normal conditions | ✓ |
-| `degraded` | Visible but partially obstructed or low quality | ✓ |
-| `needs_review` | Camera appears repositioned, or the paint re-striped | ✓ |
-| `no_crosswalk` | Camera re-aimed away, or fully obstructed | ✗ |
+| `degraded` | Visible but conditions reduced — occlusion, shadows, dusk light, glare, or a view that no longer matches the registered scene | ✓ |
+| `no_crosswalk` | No painted crosswalk visible at all — aimed somewhere without one, or fully obstructed | ✗ |
 | `feed_down` | Source outage (placeholder image) | ✗ |
+
+There is no `needs_review` status. A repositioned camera or re-striped paint is not an emergency in a camera-agnostic pipeline — the next run simply measures the new scene, with segment continuity (and its publish hold) guarding against renames. Those observations live in `conditions.cameraMoved` and `conditions.repaintSuspected` instead, and a re-aim that still shows crosswalks reports `degraded`, never `no_crosswalk`.
+
+Alongside `status`, triage reports two independent `conditions` axes: **`occlusion`** — what is physically covering the paint (`vehicle`, `construction`, `snow_cover`, …) — and **`visibility`** — the lighting or atmospheric factor reducing paint contrast (`shadows`, `dusk`, `glare`, `rain`, …). They are separate because they fail differently: an occluded stripe is hidden from any model, while low-contrast light quietly degrades detection recall. A week of run history showed dusk and late-day tree shadows cost more stripes than parked vehicles, while a streetlit night detects best of all — so `visibility` distinguishes `dusk` from `dark`, and neither is folded into an "obstruction".
 
 Publishing is gated on **detection, not classification**. Gemini has already rejected frames with no crosswalk in them, so any stripes Roboflow returns describe real paint — a run publishes whenever it detected at least one stripe.
 
