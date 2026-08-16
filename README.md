@@ -56,8 +56,6 @@ Crosswalk segments are named by their left-to-right order in the frame (`left`, 
 
 > **Known limit.** If a detected boundary grows or shrinks by a whole stripe pitch, every index shifts by one — genuinely indistinguishable from a crosswalk with one more bar at its leading edge. Sub-pitch noise, the realistic case, is cancelled by phase-snapping to the detections' own lattice. Treat the index as a stable *relative* position, not an absolute anchor. See [`app/geometry.py`](app/geometry.py).
 
-`app/reference.py` holds the hand-authored View 5056 calibration. Nothing in the production pipeline reads it; it survives as the comparison geometry for `tests/overlay.py`.
-
 ## API
 
 | Method | Path | Auth | Description |
@@ -133,7 +131,6 @@ app/
   persist.py            BigQuery + GCS persistence
   coords.py             Normalized 0-1000 ↔ source pixel conversion, image size sniffing
   storage.py            GCS storage helpers
-  reference.py          Hand-authored View 5056 calibration — overlay tool only
 docs/
   plan.md               Architecture plan and design decisions
 images/                 Reference frames and comparison images
@@ -142,10 +139,10 @@ tests/
   test_continuity.py    Segment names survive occlusion and detection gaps
   test_cameras.py       Per-camera registry and triage prompt specialization
   test_boundaries.py    Boundary capping at the registered crosswalk count
-  overlay.py            Visual overlay of detected vs reference stripes
+  overlay.py            Draw an archived run's polygons over its frame
 ```
 
-The production pipeline is `main.py` → `tools.py` → `geometry.py` → `persist.py`. There is no reasoning-loop agent: orchestration is deterministic code in `main.py`, and the only LLM prompt in the system is the triage instruction in `tools.py`. The earlier Gemini-geometry experiments (`agent.py`, `detect.py`, `match.py`, `schema.py`, `roboflow.py`, and the ADK `calibration_agent.py`) were removed once the Roboflow pipeline shipped; they live in git history.
+The production pipeline is `main.py` → `tools.py` → `geometry.py` → `persist.py`. There is no reasoning-loop agent: orchestration is deterministic code in `main.py`, and the only LLM prompt in the system is the triage instruction in `tools.py`. The earlier Gemini-geometry experiments (`agent.py`, `detect.py`, `match.py`, `schema.py`, `roboflow.py`, the hand-authored `reference.py` calibration, and the ADK `calibration_agent.py`) were removed once the Roboflow pipeline shipped; they live in git history.
 
 ## Setup
 
