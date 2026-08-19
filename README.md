@@ -2,7 +2,7 @@
 
 Relocates the [XWALK KEYBOARDS](https://github.com/vinceallenvince/xwalk-keyboards) Realtime crosswalk calibration onto a current camera frame. Deployed to Google Cloud Run and triggered by Cloud Scheduler every 15 minutes.
 
-Traffic cameras drift over time from wind, thermal expansion, and occasional re-aims. This agent detects the current stripe positions and publishes updated calibration data so the web app's keyboard stays aligned with the painted crosswalk. Cameras are registered in `app/cameras.py` (currently 511NY View 5056 — West Street at W. 34 St, Manhattan); each gets its own Cloud Scheduler job addressing `/api/calibrate-scheduled?cameraId=NNNN`.
+Traffic cameras drift over time from wind, thermal expansion, and occasional re-aims. This agent detects the current stripe positions and publishes updated calibration data so the web app's keyboard stays aligned with the painted crosswalk. Cameras are registered in `app/cameras.py` (currently 511NY View 5056 — West Street at W. 34 St — and View 5072 — West Street at Chambers St, Manhattan); each gets its own Cloud Scheduler job addressing `/api/calibrate-scheduled?cameraId=NNNN`.
 
 ## How it works
 

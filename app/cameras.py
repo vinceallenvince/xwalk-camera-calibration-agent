@@ -55,6 +55,22 @@ CAMERAS: dict[int, CameraConfig] = {
         scene="This camera shows two crosswalks separated by a bollard median.",
         expected_crosswalks=2,
     ),
+    5072: CameraConfig(
+        camera_id=5072,
+        name="511NY View 5072 (West Street at Chambers St, Manhattan)",
+        scene=(
+            "This camera shows two crosswalks separated by a planted median "
+            "with trees and bollards. Part of the camera's own mounting "
+            "assembly may fill the top of the frame, and a foreground planter "
+            "and sign pole sit between the camera and the near roadway — all "
+            "of that is normal for this scene, not an obstruction or a feed "
+            "problem."
+        ),
+        expected_crosswalks=2,
+        # SAM reads this wider view with less certainty than 5056's: the far
+        # (right) crosswalk detects at 0.55-0.79 in good light (VIN-39).
+        boundary_min_confidence=0.5,
+    ),
 }
 
 _GENERIC_SCENE = (

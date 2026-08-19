@@ -33,6 +33,24 @@ class TestRegistry:
         makes sense once someone has looked at the scene and counted."""
         assert camera_config(9999).expected_crosswalks is None
 
+    def test_5072_is_registered_with_its_own_scene(self):
+        config = camera_config(5072)
+        assert config is CAMERAS[5072]
+        assert "Chambers St" in config.name
+        assert "mounting" in config.scene
+        assert "planted median" in config.scene
+        assert config.expected_crosswalks == 2
+
+    def test_5072_lowers_the_boundary_confidence_bar(self):
+        """The far crosswalk in 5072's wider view detects at 0.55-0.79 even
+        in good light; the default 0.8 bar discarded it on every probe frame.
+        See VIN-39."""
+        assert camera_config(5072).boundary_min_confidence == 0.5
+
+    def test_other_cameras_keep_the_default_boundary_bar(self):
+        assert camera_config(5056).boundary_min_confidence is None
+        assert camera_config(9999).boundary_min_confidence is None
+
     def test_explicit_snapshot_url_wins_over_the_template(self):
         config = CameraConfig(
             camera_id=1, name="test cam", scene="a scene",
