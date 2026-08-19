@@ -37,6 +37,11 @@ class CameraConfig:
     # retiring any phantom already in it so it cannot hold future publishes.
     # None means unknown — publish whatever the detector finds.
     expected_crosswalks: int | None = None
+    # Minimum confidence for a boundary detection to count as a crosswalk.
+    # The zero-shot boundary model reads different views with different
+    # certainty — a threshold tuned to one camera can silently discard
+    # another camera's crosswalks. None means the tools.py default.
+    boundary_min_confidence: float | None = None
 
     @property
     def frame_url(self) -> str:

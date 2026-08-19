@@ -109,7 +109,11 @@ def run_calibration(
         previous = load_current(camera_id)
 
         try:
-            boundary_result = detect_boundaries(image, max_crosswalks=camera.expected_crosswalks)
+            boundary_result = detect_boundaries(
+                image,
+                max_crosswalks=camera.expected_crosswalks,
+                min_confidence=camera.boundary_min_confidence,
+            )
         except Exception as error:  # noqa: BLE001
             reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
             # Non-fatal here: continuity decides below whether the run can
