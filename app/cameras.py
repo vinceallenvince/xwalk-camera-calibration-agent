@@ -37,6 +37,11 @@ class CameraConfig:
     # retiring any phantom already in it so it cannot hold future publishes.
     # None means unknown — publish whatever the detector finds.
     expected_crosswalks: int | None = None
+    # Minimum confidence for a boundary detection to count as a crosswalk.
+    # The zero-shot boundary model reads different views with different
+    # certainty — a threshold tuned to one camera can silently discard
+    # another camera's crosswalks. None means the tools.py default.
+    boundary_min_confidence: float | None = None
 
     @property
     def frame_url(self) -> str:
@@ -49,6 +54,22 @@ CAMERAS: dict[int, CameraConfig] = {
         name="511NY View 5056 (West Street at W. 34 St, Manhattan)",
         scene="This camera shows two crosswalks separated by a bollard median.",
         expected_crosswalks=2,
+    ),
+    5072: CameraConfig(
+        camera_id=5072,
+        name="511NY View 5072 (West Street at Chambers St, Manhattan)",
+        scene=(
+            "This camera shows two crosswalks separated by a planted median "
+            "with trees and bollards. Part of the camera's own mounting "
+            "assembly may fill the top of the frame, and a foreground planter "
+            "and sign pole sit between the camera and the near roadway — all "
+            "of that is normal for this scene, not an obstruction or a feed "
+            "problem."
+        ),
+        expected_crosswalks=2,
+        # SAM reads this wider view with less certainty than 5056's: the far
+        # (right) crosswalk detects at 0.55-0.79 in good light (VIN-39).
+        boundary_min_confidence=0.5,
     ),
 }
 

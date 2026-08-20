@@ -262,6 +262,7 @@ class CameraConfig:
     scene: str                          # what the frame should show when normal
     snapshot_url: str | None = None     # explicit source; 511NY cameras omit this
     expected_crosswalks: int | None = None  # hard cap on published boundaries
+    boundary_min_confidence: float | None = None  # per-camera detection bar
 ```
 
 Cameras on 511NY need no `snapshot_url` — the template
@@ -270,7 +271,10 @@ unregistered camera still calibrates with a generic triage prompt and no
 crosswalk cap; registering it sharpens the triage.
 
 Currently registered: **View 5056** (West Street at W. 34 St, Manhattan),
-two crosswalks separated by a bollard median.
+two crosswalks separated by a bollard median; and **View 5072** (West Street
+at Chambers St, Manhattan), two crosswalks separated by a planted median,
+with a lowered `boundary_min_confidence` — the zero-shot boundary model
+reads that wider view at 0.55–0.79 even in good light.
 
 ## Status model
 

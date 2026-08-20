@@ -253,13 +253,34 @@ def largest_boundaries(detections: list[dict], count: int | None) -> list[dict]:
     return sorted(kept, key=lambda d: d["x"])
 
 
-def detect_boundaries(image_bytes: bytes, max_crosswalks: int | None = None) -> dict[str, Any]:
+def confident_boundaries(preds: list[dict], min_confidence: float | None = None) -> list[dict]:
+    """Keep only high-confidence, wide detections, in x order.
+
+    These are the real crosswalks, not painted fragments elsewhere in the
+    frame. The confidence bar is per-camera: the zero-shot boundary model is
+    sure of itself on 5056's close-up view but reads 5072's farther crosswalk
+    at 0.55–0.79 even in good light, so one global threshold tuned to the
+    first camera silently discarded the second camera's paint (VIN-39).
+    """
+    threshold = BOUNDARY_MIN_CONFIDENCE if min_confidence is None else min_confidence
+    return sorted(
+        [p for p in preds if p.get("confidence", 0) >= threshold and p.get("width", 0) >= BOUNDARY_MIN_WIDTH],
+        key=lambda p: p["x"],
+    )
+
+
+def detect_boundaries(
+    image_bytes: bytes,
+    max_crosswalks: int | None = None,
+    min_confidence: float | None = None,
+) -> dict[str, Any]:
     """Detect the crosswalk boundary polygons using Roboflow.
 
     Boundaries are named by their left-to-right order in the frame rather than
     by fixed pixel ranges, so this works on any camera regardless of where the
     crosswalks sit or how many there are. `max_crosswalks` is the camera's
-    registered crosswalk count — see largest_boundaries.
+    registered crosswalk count — see largest_boundaries. `min_confidence` is
+    the camera's boundary confidence bar — see confident_boundaries.
 
     Why the stripe pass wants boundaries at all: the boundary provides an
     origin that doesn't move when leading stripes are hidden, and a partition
@@ -279,13 +300,7 @@ def detect_boundaries(image_bytes: bytes, max_crosswalks: int | None = None) -> 
     output = resp.json()["outputs"][0]
     preds = output["predictions"].get("predictions", [])
 
-    # Keep only high-confidence, large detections (the real crosswalks, not
-    # painted fragments elsewhere in the frame).
-    real = sorted(
-        [p for p in preds if p.get("confidence", 0) >= BOUNDARY_MIN_CONFIDENCE and p.get("width", 0) >= BOUNDARY_MIN_WIDTH],
-        key=lambda p: p["x"],
-    )
-    real = largest_boundaries(real, max_crosswalks)
+    real = largest_boundaries(confident_boundaries(preds, min_confidence), max_crosswalks)
 
     crosswalks: dict[str, list[list[float]]] = {}
     for position, det in enumerate(real):
