@@ -62,16 +62,35 @@ def centroid(polygon: Polygon) -> Point:
     )
 
 
+def _oriented(vx: float, vy: float) -> Point:
+    """Point an axis in the canonical direction: +x, or +y if vertical.
+
+    An eigenvector is only defined up to sign, and the sign here decides the
+    order of the whole keyboard — segment0 must be the run at the left of the
+    frame, and stripe 0 the leftmost within it. Without this, a crosswalk
+    tilting up-to-the-right names its segments right-to-left and plays
+    backwards, and a crosswalk sitting near-horizontal has its direction
+    decided by detection noise, flipping between runs (VIN-48).
+
+    +y is the fallback for a genuinely vertical crossing (a camera looking
+    along the crosswalk rather than across it). That choice is arbitrary —
+    what matters is that it is deterministic.
+    """
+    if vx < -1e-9 or (abs(vx) <= 1e-9 and vy < 0):
+        return (-vx, -vy)
+    return (vx, vy)
+
+
 def principal_axis(polygon: Polygon) -> Point:
-    """Unit vector along the polygon's longest dimension.
+    """Unit vector along the polygon's longest dimension, pointing +x.
 
     The first principal component of the vertex cloud, via the closed-form
-    eigenvector of the 2x2 covariance matrix. For a crosswalk boundary this is
-    the direction pedestrians walk across, which is the axis stripes are
-    spaced along.
+    eigenvector of the 2x2 covariance matrix. For a crosswalk this is the
+    direction pedestrians walk across, which is the axis stripes are spaced
+    along. Every return is canonically oriented — see _oriented.
     """
     if len(polygon) < 2:
-        return (1.0, 0.0)
+        return _oriented(1.0, 0.0)
 
     mean_x, mean_y = centroid(polygon)
     n = len(polygon)
@@ -87,13 +106,13 @@ def principal_axis(polygon: Polygon) -> Point:
     # Eigenvector for that eigenvalue. When cxy is ~0 the axes are already
     # aligned, so pick whichever of x/y carries more variance.
     if abs(cxy) < 1e-9:
-        return (1.0, 0.0) if cxx >= cyy else (0.0, 1.0)
+        return _oriented(1.0, 0.0) if cxx >= cyy else _oriented(0.0, 1.0)
 
     vx, vy = cxy, eigenvalue - cxx
     length = math.hypot(vx, vy)
     if length < 1e-9:
-        return (1.0, 0.0)
-    return (vx / length, vy / length)
+        return _oriented(1.0, 0.0)
+    return _oriented(vx / length, vy / length)
 
 
 def project(point: Point, axis: Point) -> float:

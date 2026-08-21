@@ -148,6 +148,57 @@ class TestIndexing:
         assert result[0]["confidence"] == 0.9
 
 
+class TestAxisDirection:
+    """An eigenvector is only defined up to sign, and after VIN-46 that sign
+    orders the whole keyboard. These state the invariant rather than the
+    implementation, because it is easy to lose again (VIN-48)."""
+
+    def test_mirroring_in_y_does_not_reverse_the_keyboard(self):
+        """A crosswalk tilting up-to-the-right must not name its segments
+        right-to-left. Before the fix this reversed the whole run."""
+        tilted = [stripe_at(5.0 + i * PITCH, y=120.0 + i * 0.8) for i in range(8)]
+        mirrored = [
+            {"polygon": [[x, -y] for x, y in s["polygon"]]} for s in tilted
+        ]
+        assert placed(mirrored) == placed(tilted)
+
+    def test_near_horizontal_row_is_stable_under_noise(self):
+        """Sub-pixel y variation leaves cxy noise-dominated, so its sign — and
+        therefore the ordering — used to change run to run. Three archived
+        5072 runs were already reversing this way in production."""
+        import random
+
+        for seed in range(24):
+            rng = random.Random(seed)
+            stripes = [
+                stripe_at(5.0 + i * PITCH, y=120.0 + rng.uniform(-0.2, 0.2))
+                for i in range(8)
+            ]
+            result = place_stripes(stripes, FRAME_WIDTH)
+            xs = [centroid(s["polygon"])[0] for s in result]
+            assert xs == sorted(xs), f"reversed on seed {seed}"
+            assert result[0]["stripeIndex"] == 0
+
+    def test_segment0_is_leftmost_when_a_tilted_frame_splits(self):
+        stripes = (
+            [stripe_at(5.0 + i * PITCH, y=120.0 + i * 0.8) for i in range(4)]
+            + [stripe_at(5.0 + RUN_GAP + i * PITCH, y=132.0 + i * 0.8) for i in range(4)]
+        )
+        result = place_stripes(stripes, FRAME_WIDTH)
+        first = [s for s in result if s["segment"] == "segment0"]
+        assert max(centroid(s["polygon"])[0] for s in first) < RUN_GAP
+
+    def test_axis_is_canonically_oriented(self):
+        for cloud in (
+            [[0, 0], [100, 8]],
+            [[0, 0], [100, -8]],
+            [[0, 0], [0, 100]],
+            [[0, 0], [-100, -8]],
+        ):
+            vx, vy = principal_axis(cloud)
+            assert vx > 1e-9 or (abs(vx) <= 1e-9 and vy >= 0), f"{cloud} -> {(vx, vy)}"
+
+
 class TestPrimitives:
     def test_centroid_of_a_square(self):
         assert centroid([[0, 0], [10, 0], [10, 10], [0, 10]]) == (5.0, 5.0)
