@@ -114,12 +114,10 @@ def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
                 "conditions": record["conditions"],
                 "confidence": record["confidence"],
                 "referenceFrame": record.get("referenceFrame"),
-                # The full segment-keyed map is the forward schema (the web
-                # client prefers it when present); the flattened left/right
-                # aliases remain for older readers.
-                "crosswalks": record.get("crosswalks"),
-                "leftCrosswalk": record.get("leftCrosswalk"),
-                "rightCrosswalk": record.get("rightCrosswalk"),
+                # No boundary polygons: segments are gap-clustered from the
+                # stripes, and the client hulls each segment's stripes when it
+                # needs an outline. The old crosswalks / leftCrosswalk /
+                # rightCrosswalk keys are gone rather than null — see VIN-46.
                 "stripes": record.get("stripes"),
             }
             bucket.blob(path).upload_from_string(
