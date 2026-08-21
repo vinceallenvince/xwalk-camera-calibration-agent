@@ -272,6 +272,7 @@ gs://xwalk-keyboards-01/calibration/current/camera_5056.json
 ```jsonc
 {
   "cameraId": 5056,
+  "runId": "run-20260816T143000Z-a1b2c3",
   "updatedAt": "2026-08-16T14:30:00Z",
   "status": "ok",
   "conditions": {
@@ -289,13 +290,25 @@ gs://xwalk-keyboards-01/calibration/current/camera_5056.json
       "polygon": [[x, y], ...],
       "confidence": 0.93
     }
-  ]
+  ],
+  "frameUri": "gs://xwalk-keyboards-01/calibration/history/camera_5056/run-20260816T143000Z-a1b2c3.png"
 }
 ```
 
 Only detected stripes appear; there are no placeholder entries. The
 `referenceFrame` gives the frame dimensions these coordinates were measured in;
-consumers scale from it. Crosswalk boundary polygons are no longer published —
+consumers scale from it.
+
+`runId` correlates a published calibration with its BigQuery row and its
+history JSON — otherwise they can only be matched by timestamp. `frameUri` is
+the archived source frame this calibration was computed from, as a full
+`gs://` URI so a reader needs no bucket configuration; an operator opens it at
+`https://storage.cloud.google.com/<bucket>/<object>`, which authenticates
+against their own Google session rather than exposing frames publicly. The
+extension is content-sniffed at archive time, so the path cannot be derived
+from the run id — which is why it is published rather than reconstructed. The
+key is **omitted entirely** when a run archived no frame, never published as
+null. Crosswalk boundary polygons are no longer published —
 the client hulls each segment's stripes when it needs an outline, which keeps
 the gap between crosswalks unplayable without the agent describing it.
 

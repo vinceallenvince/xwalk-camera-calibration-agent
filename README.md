@@ -106,6 +106,8 @@ Each stripe in it is pure geometry — a position and an outline, in source pixe
 
 Only detected stripes appear; there are no placeholder entries. Crosswalk boundary polygons are not published — the client hulls each segment's stripes when it needs an outline. `referenceFrame` gives the frame these coordinates were measured in, and consumers scale from it.
 
+The payload also carries `runId` (correlates with the BigQuery row and history JSON) and `frameUri` — the `gs://` URI of the archived frame this calibration was computed from, so an operator can open the exact image behind a suspicious result at `https://storage.cloud.google.com/<bucket>/<object>`. `frameUri` is omitted when a run archived no frame.
+
 Every run also archives its full JSON record and source frame to GCS history:
 
 ```
