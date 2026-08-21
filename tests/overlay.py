@@ -3,8 +3,9 @@
     uv run python tests/overlay.py images/videoframe_872991-no-occlusion.png out/<run>.json
 
 Works on the records the agent publishes and archives (the GCS history pairs
-of <runId>.json + <runId>.png): crosswalk boundaries are drawn in amber and
-stripes in mint, each labelled with its stripeIndex. Coordinates are scaled
+of <runId>.json + <runId>.png): stripes are drawn in mint, each labelled with
+its stripeIndex. Records archived before VIN-46 also carry crosswalk boundary
+polygons, drawn in amber; current records have none. Coordinates are scaled
 from the record's referenceFrame, so a frame grabbed at a different resolution
 still lines up. Output is upscaled so a 352 x 240 source is inspectable.
 """
@@ -39,8 +40,8 @@ def main() -> int:
     def scaled(polygon):
         return [(p[0] * sx, p[1] * sy) for p in polygon]
 
-    # Crosswalk boundaries: the segment map, falling back to the flat aliases
-    # older records carry.
+    # Crosswalk boundaries only exist in pre-VIN-46 records — the segment map,
+    # falling back to the flat aliases the oldest ones carry.
     crosswalks = record.get("crosswalks") or {
         "left": record.get("leftCrosswalk") or [],
         "right": record.get("rightCrosswalk") or [],
@@ -71,12 +72,14 @@ def main() -> int:
     print(f"reasoning : {record.get('reasoning')}")
     for name in sorted(per_segment):
         indexes = sorted(per_segment[name])
+        line = f"{name:<9} : {len(indexes)} stripes, indexes {indexes[0]}-{indexes[-1]}"
+        # Current records index ordinally, so a gap means the record predates
+        # VIN-46 and the missing slots are stripes the model could not see.
         gaps = sorted(set(range(indexes[0], indexes[-1] + 1)) - set(indexes))
-        print(
-            f"{name:<9} : {len(indexes)} stripes, "
-            f"indexes {indexes[0]}-{indexes[-1]}, hidden {gaps or 'none'}"
-        )
-    print("legend    : mint = stripes (stripeIndex labelled), amber = crosswalk boundaries")
+        if gaps:
+            line += f", hidden {gaps} (pre-VIN-46 positional indexing)"
+        print(line)
+    print("legend    : mint = stripes (stripeIndex labelled), amber = boundaries (pre-VIN-46 only)")
     return 0
 
 

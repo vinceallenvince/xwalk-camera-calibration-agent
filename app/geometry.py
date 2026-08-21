@@ -1,63 +1,56 @@
 """Camera-agnostic geometry for turning raw detections into stripe positions.
 
-Nothing here knows about View 5056, musical notes, or how many stripes a
-crosswalk "should" have. Given a crosswalk boundary polygon and a set of
-detected stripe polygons, it answers one question: where does each stripe sit
-along the crosswalk?
+Nothing here knows about a particular camera, musical notes, or how many
+stripes a crosswalk "should" have. Given a set of detected stripe polygons, it
+answers one question: where does each stripe sit along the crosswalk?
 
 Glossary:
 
-  boundary       — the crosswalk's outline polygon. Its leading edge is the
-                   origin stripes are counted from.
-  principal axis — the direction the boundary is stretched; the axis the
-                   stripes are spaced along.
+  principal axis — the direction the stripe centroids are spread; the axis the
+                   crosswalk runs along.
   projection     — a stripe centroid's scalar position along that axis.
-  pitch          — the center-to-center distance between adjacent stripes.
-                   Spacing, as in screw threads — not a musical pitch; this
-                   module knows nothing about notes.
-  phase          — the fractional offset of the whole stripe lattice from the
-                   origin, shared by every stripe.
-  stripeIndex    — how many pitches from the origin a stripe sits. Integer,
-                   0-based, per segment.
-  segment        — which crosswalk a stripe belongs to ("left", "right", ...).
+  segment        — which crosswalk run a stripe belongs to. Named positionally
+                   along the axis: "segment0", "segment1", ...
+  stripeIndex    — the stripe's ordinal position within its segment. Integer,
+                   0-based, contiguous.
 
 The heuristic in one pass: flatten each stripe polygon to its centroid,
-project the centroids onto the principal axis, take the median gap between
-neighbours as the pitch, count pitches from the boundary's leading edge,
-subtract the shared phase, and round to the nearest slot.
+project the centroids onto the principal axis, sort, start a new segment
+wherever the gap to the next stripe exceeds SEGMENT_GAP_FRACTION of the frame
+width, and number the stripes within each segment in order.
 
-Two properties make the index usable as a stable identity:
+Indexes are ordinal, not positional. A stripe the model could not see this run
+does not leave a hole — its neighbours simply renumber. Identities therefore
+wobble between runs, which is a deliberate trade (VIN-44): the client anchors
+notes from a per-camera base rather than pinning a stripe to a fixed pitch, so
+a renumbering transposes the scale rather than corrupting it. Nothing here
+carries memory between runs.
 
-  - The origin comes from the boundary, not from the detections, so a stripe
-    keeps its index when a car occludes its neighbours.
-  - The pitch is the *median* gap between detections, so it survives missing
-    stripes (one absent bar makes a single 2x gap; the median ignores it).
-
-The boundary's leading edge sits an arbitrary fraction of a pitch before the
-first stripe, and that fraction moves as the detected polygon tightens and
-loosens. Snapping to the phase of the detections themselves cancels it out.
-
-Known limit: if the boundary changes by a *whole* pitch, every index shifts by
-one, because that is genuinely indistinguishable from a crosswalk with one more
-stripe at its leading edge. Sub-pitch noise — the realistic case — is handled.
-Consumers should treat the index as a stable relative position rather than an
-absolute anchor.
-
-Gaps in the index sequence are meaningful: they are stripes the model could
-not see this run.
+Why a gap threshold, and why a fraction of frame width: the separation between
+crosswalk runs is far larger than the spacing between stripes within one run
+(on both registered cameras, medians of ~136px and ~9px in a 352px frame). A
+threshold relative to the *median stripe gap* was tried and rejected — sparse
+reads inflate that median and balloon the threshold, so it under-splits exactly
+when detection is worst. Replayed against 341 archived runs across both
+cameras, a frame-width fraction agrees with the retired boundary pipeline on
+86% (5056) and 90% (5072) of runs, and the plateau spans 0.20-0.35 on both,
+so the constant is not knife-edge.
 """
 
 import math
-import statistics
 from typing import Any
 
 Point = tuple[float, float]
 Polygon = list[list[float]]
 
-# Below this many detections there is no meaningful gap to take a median of,
-# so the pitch is estimated from the boundary extent instead.
-MIN_STRIPES_FOR_PITCH = 3
+# Start a new segment when the gap between consecutive stripes along the axis
+# exceeds this fraction of the frame width. Centre of the plateau that serves
+# both registered cameras; see the module docstring.
+SEGMENT_GAP_FRACTION = 0.25
 
+# Used when a caller cannot supply a frame width. Both registered cameras are
+# 352px wide; a wrong guess only shifts where segments split.
+FALLBACK_FRAME_WIDTH = 352.0
 
 def centroid(polygon: Polygon) -> Point:
     """Arithmetic mean of the vertices — good enough for thin stripe quads."""
@@ -108,176 +101,44 @@ def project(point: Point, axis: Point) -> float:
     return point[0] * axis[0] + point[1] * axis[1]
 
 
-def estimate_pitch(projections: list[float], span: float) -> float:
-    """Distance between adjacent stripes, robust to missing ones.
-
-    Uses the median consecutive gap. A stripe hidden by a vehicle turns one
-    gap into roughly 2x pitch, which the median discards as long as fewer than
-    half the stripes are missing. Falls back to spreading the detections
-    evenly across the boundary span when there are too few to measure.
-    """
-    ordered = sorted(projections)
-
-    if len(ordered) >= MIN_STRIPES_FOR_PITCH:
-        gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b - a > 1e-6]
-        if gaps:
-            return statistics.median(gaps)
-
-    if len(ordered) >= 2:
-        measured = ordered[-1] - ordered[0]
-        if measured > 1e-6:
-            return measured / (len(ordered) - 1)
-
-    # A single detection tells us nothing about spacing; any positive pitch
-    # puts it at a sane index, so use the whole span.
-    return span if span > 1e-6 else 1.0
+def segment_name(position: int) -> str:
+    """Name the nth crosswalk run, counting along the principal axis."""
+    return f"segment{position}"
 
 
-def index_stripes(boundary: Polygon, stripes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assign each stripe an integer slot index along the crosswalk.
+def place_stripes(
+    stripes: list[dict[str, Any]],
+    frame_width: float | None = None,
+) -> list[dict[str, Any]]:
+    """Assign each stripe a segment and an ordinal index along the crosswalk.
 
-    `stripes` entries need a "polygon" key. Returns them with "stripeIndex"
-    added, ordered by that index. Stripes are indexed from the boundary's
-    leading edge, so the index reflects physical position rather than
-    detection order.
+    `stripes` entries need a "polygon" key. Returns them with "segment" and
+    "stripeIndex" added, ordered along the principal axis. Segments are named
+    positionally, so "segment0" is always the first run along that axis.
     """
     if not stripes:
         return []
 
     centroids = [centroid(s["polygon"]) for s in stripes]
-
-    # The axis and origin come from the boundary so they stay put when
-    # detections come and go. Without a usable boundary, fall back to the
-    # stripes' own centroid cloud.
-    has_boundary = bool(boundary) and len(boundary) >= 3
-    axis = principal_axis(boundary if has_boundary else [[c[0], c[1]] for c in centroids])
-
+    axis = principal_axis([[c[0], c[1]] for c in centroids])
     projections = [project(c, axis) for c in centroids]
 
-    if has_boundary:
-        edges = [project((p[0], p[1]), axis) for p in boundary]
-        origin, span = min(edges), max(edges) - min(edges)
-    else:
-        origin, span = min(projections), max(projections) - min(projections)
+    threshold = SEGMENT_GAP_FRACTION * (frame_width or FALLBACK_FRAME_WIDTH)
 
-    pitch = estimate_pitch(projections, span)
+    placed: list[dict[str, Any]] = []
+    segment, index, previous = 0, 0, None
 
-    # Slot positions before phase correction. These are anchored to the
-    # boundary edge, which sits an arbitrary fraction of a pitch before the
-    # first stripe — and that fraction wobbles as the boundary polygon
-    # tightens and loosens between runs.
-    raw = [(p - origin) / pitch for p in projections]
+    for position in sorted(range(len(stripes)), key=lambda i: projections[i]):
+        projection = projections[position]
+        if previous is not None and projection - previous > threshold:
+            segment += 1
+            index = 0
+        placed.append({
+            **stripes[position],
+            "segment": segment_name(segment),
+            "stripeIndex": index,
+        })
+        index += 1
+        previous = projection
 
-    # Snapping to the detections' own lattice removes that wobble: the phase
-    # is a property of the stripe spacing, not of which stripes happen to be
-    # visible, so it lands in the same place when the leading bars are hidden.
-    phase = _estimate_phase(raw)
-
-    indexed = [
-        {**stripe, "stripeIndex": max(0, _round_half_up(value - phase))}
-        for stripe, value in zip(stripes, raw)
-    ]
-
-    indexed.sort(key=lambda s: s["stripeIndex"])
-    return _dedupe_indexes(indexed)
-
-
-def _round_half_up(value: float) -> int:
-    """Round .5 away from zero.
-
-    Python's built-in round() is banker's rounding, which sends 0.5 and 1.5
-    to 0 and 2 — evenly spaced stripes landing exactly on half-slots would
-    collide in pairs.
-    """
-    return int(math.floor(value + 0.5))
-
-
-def _estimate_phase(raw: list[float]) -> float:
-    """Fractional offset of the stripe lattice, as a circular mean.
-
-    Averaging the fractional parts directly breaks when they straddle the
-    0/1 wrap (0.98 and 0.02 average to 0.5 rather than 0.0), so treat each
-    fraction as an angle and average on the circle instead.
-    """
-    if not raw:
-        return 0.0
-
-    angles = [2 * math.pi * (value % 1.0) for value in raw]
-    mean_sin = sum(math.sin(a) for a in angles) / len(angles)
-    mean_cos = sum(math.cos(a) for a in angles) / len(angles)
-
-    # Fractions spread evenly around the circle cancel out and leave no
-    # meaningful phase — keep the boundary anchor in that case.
-    if math.hypot(mean_sin, mean_cos) < 1e-9:
-        return 0.0
-
-    return (math.atan2(mean_sin, mean_cos) / (2 * math.pi)) % 1.0
-
-
-def _dedupe_indexes(stripes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ensure indexes are strictly increasing.
-
-    Two detections can round into the same slot when the pitch estimate is
-    slightly short. Rather than drop one, push the later stripe to the next
-    free slot — it keeps every detection and preserves left-to-right order.
-    """
-    seen: set[int] = set()
-    for stripe in stripes:
-        index = stripe["stripeIndex"]
-        while index in seen:
-            index += 1
-        stripe["stripeIndex"] = index
-        seen.add(index)
-    return stripes
-
-
-def assign_segments(
-    detections: list[dict[str, Any]],
-    boundaries: dict[str, Polygon],
-) -> dict[str, list[dict[str, Any]]]:
-    """Group detections by which crosswalk boundary they fall in.
-
-    Replaces the old hardcoded pixel ranges for View 5056's bollard median.
-    A detection inside a boundary belongs to it; one outside every boundary
-    goes to the nearest by centroid distance, which keeps stripes whose paint
-    spills past a tight boundary polygon.
-    """
-    grouped: dict[str, list[dict[str, Any]]] = {name: [] for name in boundaries}
-    usable = {name: polygon for name, polygon in boundaries.items() if polygon and len(polygon) >= 3}
-    if not usable:
-        return grouped
-
-    for detection in detections:
-        point = (detection["x"], detection["y"])
-
-        containing = [name for name, polygon in usable.items() if point_in_polygon(point, polygon)]
-        if len(containing) == 1:
-            grouped[containing[0]].append(detection)
-            continue
-
-        candidates = containing or list(usable)
-        nearest = min(
-            candidates,
-            key=lambda name: _squared_distance(point, centroid(usable[name])),
-        )
-        grouped[nearest].append(detection)
-
-    return grouped
-
-
-def point_in_polygon(point: Point, polygon: Polygon) -> bool:
-    """Standard ray-casting test."""
-    x, y = point
-    inside = False
-    previous = len(polygon) - 1
-    for current in range(len(polygon)):
-        cx, cy = polygon[current][0], polygon[current][1]
-        px, py = polygon[previous][0], polygon[previous][1]
-        if (cy > y) != (py > y) and x < (px - cx) * (y - cy) / (py - cy) + cx:
-            inside = not inside
-        previous = current
-    return inside
-
-
-def _squared_distance(a: Point, b: Point) -> float:
-    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+    return placed

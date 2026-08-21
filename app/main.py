@@ -23,10 +23,9 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.cameras import camera_config
-from app.continuity import reconcile_segments
 from app.coords import sniff_image_size
-from app.persist import load_current, save
-from app.tools import analyse_conditions, detect_boundaries, detect_stripes
+from app.persist import save
+from app.tools import analyse_conditions, detect_stripes
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 DEFAULT_CAMERA_ID = int(os.environ.get("CALIBRATION_CAMERA_ID", "5056"))
@@ -47,27 +46,6 @@ def _frame_size(image: bytes) -> dict[str, int] | None:
     except Exception:  # noqa: BLE001
         return None
     return {"width": width, "height": height} if width and height else None
-
-
-def _previous_crosswalks(record: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Boundary polygons from the last published calibration, keyed by segment.
-
-    The current/ schema publishes flattened left/right aliases; newer records
-    may also carry the full `crosswalks` map. Prefer the map so segments
-    beyond left/right keep their identity too.
-    """
-    if not record:
-        return None
-    crosswalks = record.get("crosswalks")
-    if isinstance(crosswalks, dict) and crosswalks:
-        return crosswalks
-
-    flattened = {
-        name: record.get(f"{name}Crosswalk")
-        for name in ("left", "right")
-    }
-    usable = {name: poly for name, poly in flattened.items() if poly}
-    return usable or None
 
 
 def run_calibration(
@@ -95,61 +73,16 @@ def run_calibration(
     gemini_tokens = (conditions_result.get("_usage") or {}).get("totalTokens")
     model = conditions_result.get("_model")
 
-    # Step 2: Roboflow detection (if crosswalk is visible). Boundaries run
-    # first — they tell the stripe pass which crosswalk each detection belongs
-    # to and where to measure slot positions from — and are then reconciled
-    # against the last published calibration so segment names keep meaning the
-    # same physical crosswalk from run to run. The web client maps names to
-    # fixed pitch anchors; a name that drifted would transpose a keyboard.
+    # Step 2: Roboflow stripe detection (if a crosswalk is visible).
+    # Segments come from the stripes themselves — gap-clustered along the
+    # crosswalk axis, named positionally (see geometry.place_stripes). There
+    # is no boundary pass and no run-over-run memory: identities are allowed
+    # to wobble, and the client anchors notes from a per-camera base so a
+    # renumbering transposes the scale rather than corrupting it (VIN-44).
     detection_result: dict[str, Any] | None = None
-    boundary_result: dict[str, Any] | None = None
-    crosswalks: dict[str, Any] = {}
-    continuity: dict[str, Any] | None = None
     if status not in ("no_crosswalk", "feed_down"):
-        previous = load_current(camera_id)
-
         try:
-            boundary_result = detect_boundaries(
-                image,
-                max_crosswalks=camera.expected_crosswalks,
-                min_confidence=camera.boundary_min_confidence,
-            )
-        except Exception as error:  # noqa: BLE001
-            reasoning = (reasoning or "") + f" Boundary detection failed: {error}"
-            # Non-fatal here: continuity decides below whether the run can
-            # still publish without boundaries.
-
-        detected = (boundary_result or {}).get("crosswalks") or {}
-        crosswalks, continuity = reconcile_segments(
-            detected, _previous_crosswalks(previous), camera.expected_crosswalks,
-        )
-
-        if continuity["retired"]:
-            # The published baseline carried more segments than the camera has
-            # crosswalks — phantoms from an occlusion-split, published before
-            # the detection cap. They are dropped from the baseline rather
-            # than counted as missing, or they would hold publishes forever.
-            names = ", ".join(continuity["retired"])
-            reasoning = (reasoning or "") + (
-                f" Boundary continuity: retired phantom {names} — the registered"
-                f" crosswalk count is {camera.expected_crosswalks}."
-            )
-        if continuity["renamed"]:
-            renames = ", ".join(f"{old}->{new}" for old, new in continuity["renamed"].items())
-            reasoning = (reasoning or "") + f" Segment continuity: renamed {renames} to match the published calibration."
-        if continuity["regression"]:
-            # A crosswalk the client is playing was not found this run. Do not
-            # overwrite the published calibration with a renamed or merged
-            # read — mark the run degraded and hold the last good publish.
-            if status == "ok":
-                status = "degraded"
-            missing = ", ".join(continuity["missing"])
-            reasoning = (reasoning or "") + (
-                f" Boundary continuity: {missing} not detected this run; holding the published calibration."
-            )
-
-        try:
-            detection_result = detect_stripes(image, crosswalks or None)
+            detection_result = detect_stripes(image)
         except Exception as error:  # noqa: BLE001
             reasoning = (reasoning or "") + f" Stripe detection failed: {error}"
             status = "degraded"
@@ -160,13 +93,9 @@ def run_calibration(
     # Roboflow returns describe real paint. Occlusion varies frame to frame
     # and a partial read is still a correct read — each stripe carries its own
     # position, so the client renders what it is given without needing a
-    # complete set. The one exception is a boundary continuity regression:
-    # publishing a run that lost or merged a previously published crosswalk
-    # would rename segments under the client, so those runs are archived but
-    # never promoted to current/.
+    # complete set. Any run that saw a stripe publishes.
     visible = (detection_result or {}).get("visible_count", 0)
-    regression = bool(continuity and continuity["regression"])
-    should_publish = detection_result is not None and visible > 0 and not regression
+    should_publish = detection_result is not None and visible > 0
     elapsed_ms = round((time.monotonic() - started) * 1000)
 
     record: dict[str, Any] = {
@@ -178,9 +107,6 @@ def run_calibration(
         "conditions": conditions,
         "confidence": confidence,
         "referenceFrame": (detection_result or {}).get("referenceFrame") or _frame_size(image),
-        "crosswalks": crosswalks or None,
-        "leftCrosswalk": crosswalks.get("left", []),
-        "rightCrosswalk": crosswalks.get("right", []),
         "stripes": (detection_result or {}).get("stripes"),
         "stripe_count": (detection_result or {}).get("stripe_count"),
         "visible_count": visible,
@@ -188,7 +114,6 @@ def run_calibration(
         "min_confidence": (detection_result or {}).get("min_confidence"),
         "mean_confidence": (detection_result or {}).get("mean_confidence"),
         "matching_notes": (detection_result or {}).get("segments"),
-        "continuity": continuity,
         "model": model,
         "elapsed_ms": elapsed_ms,
         "gemini_tokens": gemini_tokens,
