@@ -24,6 +24,9 @@ The architecture is designed around three non-negotiable properties:
 3. **Partial reads are correct reads.** A frame with six visible stripes
    publishes six stripes, not zero. Each stripe carries its own position; the
    client renders what it is given without needing a complete set.
+4. **No memory between runs.** Every run derives its segments and indexes from
+   that frame's detections alone. Identities are therefore allowed to drift —
+   see "Stripe identity" below for why that is a feature and not an oversight.
 
 ## System overview
 
@@ -44,17 +47,16 @@ The architecture is designed around three non-negotiable properties:
 |                                          |
 | main.py: deterministic pipeline          |
 |   1. Gemini Flash triage                 |
-|   2. Roboflow boundary detection         |
-|   3. Roboflow stripe detection           |
-|   4. Geometry placement + continuity     |
-|   5. Persist to BigQuery + GCS           |
+|   2. Roboflow stripe detection           |
+|   3. Geometry: cluster + index           |
+|   4. Persist to BigQuery + GCS           |
 +-----+------------------+----------------+
       |                  |
       v                  v
 +------------+  +---------------------+
 | 511NY      |  | Roboflow Workflows  |
 | camera     |  | stripe segmentation |
-| snapshots  |  | boundary detection  |
+| snapshots  |  |                     |
 +------------+  +---------------------+
 
 Persistence
@@ -71,7 +73,7 @@ flowchart LR
   Agent["Calibration Agent\nCloud Run"]
   NY["511NY\ncamera snapshots"]
   Gemini["Gemini 2.5 Flash\ntriage classification"]
-  RF["Roboflow Workflows\nstripe + boundary detection"]
+  RF["Roboflow Workflows\nstripe segmentation"]
   BQ["BigQuery\nrun history"]
   GCS["GCS\nlive calibration + archive"]
   Web["XWALK KEYBOARDS\nweb app"]
@@ -86,10 +88,9 @@ flowchart LR
 ```
 
 The agent fetches a camera snapshot, asks Gemini whether the crosswalk is
-visible, and if so runs two Roboflow workflows — one for crosswalk boundaries,
-one for stripe polygons. Code places each stripe along its crosswalk, and
-persistence writes the result to BigQuery (for dashboards) and GCS (for the
-web client).
+visible, and if so runs one Roboflow workflow for stripe polygons. Code groups
+those stripes into crosswalk segments and indexes each one, and persistence
+writes the result to BigQuery (for dashboards) and GCS (for the web client).
 
 ## Pipeline stages
 
@@ -129,89 +130,52 @@ needs to classify a frame and produce a short explanation. Flash is fast, cheap,
 and well suited to classification. The geometry work that needs precision is
 Roboflow's job.
 
-### Stage 2: Roboflow boundary detection
+### Stage 2: Roboflow stripe detection
 
-**Module:** `app/tools.py` — `detect_boundaries()`
+**Module:** `app/tools.py` — `detect_stripes()`
 
-A Roboflow serverless workflow returns the crosswalk outline polygons. These
-are named by their left-to-right order in the frame (`left`, `right`, then
-`segment3`, `segment4`…), so nothing depends on where a particular camera's
-crosswalks sit.
+A Roboflow workflow returns paint-accurate instance-segmentation polygons for
+each visible stripe. Detections are filtered on size and confidence, then
+deduplicated by centroid distance.
 
-Boundaries serve two purposes in the stripe pass:
+There is no second detection call. The agent used to run a boundary workflow
+alongside this one, to supply a stable index origin and a partition between
+crosswalks; both jobs were deleted in 2026-08 rather than moved — see "Stripe
+identity" below.
 
-- **Origin.** The boundary's leading edge is the origin from which stripe
-  positions are measured, and it does not move when leading stripes are hidden.
-- **Partition.** When the gap between crosswalks is occluded, the boundary
-  polygons tell the stripe pass which crosswalk each detection belongs to.
+### Stage 3: Geometry — clustering and indexing
 
-**Boundary cap.** When a camera's registered crosswalk count is known
-(`expected_crosswalks` on `CameraConfig`), `largest_boundaries()` drops
-fragments beyond that count. Occlusion can split one crosswalk into multiple
-detected boundaries — a truck parked mid-crosswalk leaves two disconnected
-patches of paint, and each becomes its own detection. Without the cap, a
-fragment gets published as a phantom segment that boundary continuity then
-demands on every later run.
+**Module:** `app/geometry.py` — `place_stripes()`
 
-### Stage 3: Segment continuity
+One pass over the detections:
 
-**Module:** `app/continuity.py` — `reconcile_segments()`
+1. Flatten each stripe polygon to its centroid.
+2. Compute the principal axis of the centroid cloud — the direction the
+   crosswalk runs — and project every centroid onto it.
+3. Sort along that axis. Where the gap to the next stripe exceeds
+   `SEGMENT_GAP_FRACTION` (0.25) of the frame width, start a new segment.
+4. Name segments positionally: `segment0`, `segment1`, …
+5. Number stripes ordinally within each segment, from 0.
 
-The web client maps segment names to fixed pitch anchors. A segment name that
-drifts between runs transposes a whole keyboard. This module provides temporal
-memory: detected boundaries are matched to the previously published calibration
-by bounding-box IoU, matched boundaries adopt their previous segment names, and
-the disappearance of a previously known crosswalk is reported as a regression
-so the caller can hold the last good publish.
+**Why a gap threshold works.** The separation between crosswalk runs is an
+order of magnitude larger than the spacing between stripes within one run:
+across 341 archived runs on the two registered cameras, the median within-run
+gap is 9.4px and the median between-run gap is 135.8px on a 352px frame.
 
-The continuity check produces three signals:
+**Why a fraction of frame width, and not of the median stripe gap.** A
+relative-to-median threshold was tried and is measurably worse (63% vs 91%
+agreement with the retired boundary pipeline). Sparse reads inflate the median
+gap, which balloons the threshold and under-splits — failing hardest exactly
+when detection is weakest. The frame-width fraction has a wide plateau
+(0.20–0.35 serves both cameras), so the constant is not knife-edge.
 
-| Signal | Meaning |
-| --- | --- |
-| `renamed` | A detected boundary was matched to a previous segment with a different positional name — it adopts the previous name |
-| `missing` | Previous segment names that went unmatched this run |
-| `regression` | A previously published crosswalk was not found — the caller holds the previous publish instead of overwriting it |
-| `retired` | Previous segments dropped from the baseline because they exceed the camera's registered crosswalk count — phantoms from an occlusion-split, published before the detection cap existed |
+**Accepted failure modes.** The gap distributions overlap in the tails: 183 of
+1026 within-run gaps exceeded the smallest between-run gap. A vehicle parked
+mid-crosswalk punches a hole wide enough to over-split one run into two
+segments; crosswalks closer together than the threshold under-split into one.
+Both are asserted in `tests/test_geometry.py` so they stay deliberate.
 
-The registered crosswalk count bounds the **baseline** exactly as it bounds
-detections. A phantom segment in the published calibration can never be
-matched by a capped detection pass, so counting its absence as missing would
-hold every future publish — the baseline would defend the phantom forever.
-Retirement keeps the largest `expected_crosswalks` baseline boundaries (a
-fragment is always smaller than the crosswalk it broke off of) and lets the
-run publish.
-
-### Stage 4: Roboflow stripe detection + geometry placement
-
-**Modules:** `app/tools.py` — `detect_stripes()`, `app/geometry.py`
-
-A second Roboflow workflow returns paint-accurate instance-segmentation
-polygons for each visible stripe. The geometry module assigns each stripe a
-`stripeIndex`: its slot position along the crosswalk, measured from the
-boundary's leading edge in units of the stripe pitch.
-
-The heuristic in one pass: flatten each stripe polygon to its centroid, project
-the centroids onto the crosswalk's principal axis, take the median gap between
-neighbours as the pitch, count pitches from the boundary's leading edge,
-subtract the shared phase, and round to the nearest slot.
-
-Two properties make the index usable as a stable identity:
-
-- The origin comes from the **boundary**, not from the detections, so a stripe
-  keeps its index when a vehicle hides its neighbours.
-- The pitch is the **median** gap between detections, so it survives missing
-  stripes — one absent bar makes a single double-width gap, and the median
-  ignores it.
-
-**Known limit.** If the boundary changes by a whole stripe pitch, every index
-shifts by one — genuinely indistinguishable from a crosswalk with one more bar
-at its leading edge. Sub-pitch noise, the realistic case, is cancelled by
-phase-snapping to the detections' own lattice.
-
-Gaps in the index sequence are meaningful: they are stripes the model could not
-see in that frame.
-
-### Stage 5: Persistence
+### Stage 4: Persistence
 
 **Module:** `app/persist.py`
 
@@ -223,9 +187,9 @@ Every run writes to three stores:
 | GCS `calibration/history/camera_NNNN/<runId>.json` + `.png` | Full JSON record and the source frame | Every run |
 | GCS `calibration/current/camera_NNNN.json` | The live calibration the web client reads | Publish runs only |
 
-A run publishes when it detected at least one stripe and there is no boundary-
-continuity regression. Runs that publish nothing are still recorded in BigQuery
-and archived to GCS history, leaving the live calibration untouched.
+A run publishes when it detected at least one stripe. Runs that publish
+nothing are still recorded in BigQuery and archived to GCS history, leaving
+the live calibration untouched.
 
 ## Deployment unit
 
@@ -261,20 +225,21 @@ class CameraConfig:
     name: str                           # human-readable, used in the triage prompt
     scene: str                          # what the frame should show when normal
     snapshot_url: str | None = None     # explicit source; 511NY cameras omit this
-    expected_crosswalks: int | None = None  # hard cap on published boundaries
-    boundary_min_confidence: float | None = None  # per-camera detection bar
 ```
+
+There is deliberately no geometry here. Crosswalk counts and detection
+thresholds both used to live on this dataclass and were deleted: segments are
+discovered from the detections every run, so onboarding a camera is a scene
+description and a scheduler job.
 
 Cameras on 511NY need no `snapshot_url` — the template
 `https://511ny.org/map/Cctv/{camera_id}` derives it from the ID. An
-unregistered camera still calibrates with a generic triage prompt and no
-crosswalk cap; registering it sharpens the triage.
+unregistered camera still calibrates with a generic triage prompt;
+registering it sharpens the triage.
 
 Currently registered: **View 5056** (West Street at W. 34 St, Manhattan),
 two crosswalks separated by a bollard median; and **View 5072** (West Street
-at Chambers St, Manhattan), two crosswalks separated by a planted median,
-with a lowered `boundary_min_confidence` — the zero-shot boundary model
-reads that wider view at 0.55–0.79 even in good light.
+at Chambers St, Manhattan), two crosswalks separated by a planted median.
 
 ## Status model
 
@@ -287,15 +252,12 @@ reads that wider view at 0.55–0.79 even in good light.
 
 There is no `needs_review` status. A repositioned camera or re-striped paint is
 not an emergency in a camera-agnostic pipeline — the next run measures the new
-scene, with segment continuity guarding against renames. A re-aimed camera with
-paint still visible reports `degraded` with `cameraMoved: "significant"`, never
-`no_crosswalk`.
+scene. A re-aimed camera with paint still visible reports `degraded` with
+`cameraMoved: "significant"`, never `no_crosswalk`.
 
 Publishing is gated on **detection, not classification.** Gemini has already
 rejected frames with no crosswalk, so any stripes Roboflow returns describe
-real paint. The one exception is a boundary-continuity regression: publishing a
-run that lost a previously published crosswalk would rename segments under the
-client, so those runs are archived but never promoted to `current/`.
+real paint. Any run that saw a stripe publishes; there are no other gates.
 
 ## Canonical data shapes
 
@@ -320,16 +282,10 @@ gs://xwalk-keyboards-01/calibration/current/camera_5056.json
     "repaintSuspected": false
   },
   "referenceFrame": { "width": 352, "height": 240 },
-  "crosswalks": {
-    "left": [[x, y], ...],
-    "right": [[x, y], ...]
-  },
-  "leftCrosswalk": [[x, y], ...],   // flattened alias for older readers
-  "rightCrosswalk": [[x, y], ...],  // flattened alias for older readers
   "stripes": [
     {
       "stripeIndex": 7,
-      "segment": "left",
+      "segment": "segment0",
       "polygon": [[x, y], ...],
       "confidence": 0.93
     }
@@ -339,21 +295,36 @@ gs://xwalk-keyboards-01/calibration/current/camera_5056.json
 
 Only detected stripes appear; there are no placeholder entries. The
 `referenceFrame` gives the frame dimensions these coordinates were measured in;
-consumers scale from it. The `crosswalks` map is the forward schema; the
-flattened `leftCrosswalk`/`rightCrosswalk` aliases remain for older readers.
+consumers scale from it. Crosswalk boundary polygons are no longer published —
+the client hulls each segment's stripes when it needs an outline, which keeps
+the gap between crosswalks unplayable without the agent describing it.
 
-### Stripe identity contract
+### Stripe identity
 
-Each stripe carries a `stripeIndex` and a `segment`. Together they form the
-stripe's identity. Notes are deliberately absent — the agent reports where the
-paint is, and the client owns the mapping from index to pitch. This is the
-boundary between the calibration service and the musical instrument.
+Each stripe carries a `segment` and a `stripeIndex`. Notes are deliberately
+absent — the agent reports where the paint is, and the client owns the mapping
+from position to pitch. This is the boundary between the calibration service
+and the musical instrument.
 
-The web app (see `SCALE_BY_SEGMENT` in `src/lib/use-calibration.ts` in
-xwalk-keyboards) maps segment names to pitch anchors and stripe indexes to
-notes. A segment name that drifts between runs transposes a keyboard; an index
-that shifts silently remaps a key to the wrong note. Both the continuity module
-and the phase-snapping geometry protect against those failures.
+**Identities are not stable across runs, by design.** Indexes are ordinal
+within a segment, so a stripe the model could not see this run does not leave
+a hole — its neighbours renumber. Segments are re-derived by clustering every
+run, so their count and membership can change too.
+
+This was a deliberate reversal (2026-08-21). The agent previously defended
+stable identities with boundary-anchored positional indexing, median-pitch
+estimation, phase-snapping, and run-over-run segment reconciliation that held
+the publish whenever a known crosswalk went missing. That machinery was the
+most complex and most camera-specific part of the system, and it worked
+hardest precisely when the frame was least legible. It was deleted on the
+grounds that a pedestrian does not know the mapping: a transposed keyboard is
+still a keyboard, while stale geometry that no longer sits on the paint is a
+broken one. Freshness is the guarantee that was kept.
+
+The client absorbs the wobble by anchoring notes from a single per-camera base
+and numbering globally across segments, so the scale transposes rather than
+scrambling. Reintroducing stability heuristics here means reopening that
+decision, not just adding code.
 
 ## Why two models, not one
 
@@ -399,31 +370,29 @@ penalises frequent small reads.
 ```text
 main.py
   ├── cameras.py          camera registry and config
-  ├── tools.py            Gemini triage + Roboflow detection
-  │     └── geometry.py   stripe placement (axis, pitch, indexing)
-  ├── continuity.py       segment name stability across runs
+  ├── tools.py            Gemini triage + Roboflow stripe detection
+  │     └── geometry.py   clustering and indexing (axis, gap, ordinal)
   ├── persist.py          BigQuery + GCS writes
   └── coords.py           image size sniffing (PNG/JPEG header parsing)
 ```
 
-`geometry.py` is pure math with no network or I/O dependencies.
-`continuity.py` is pure matching logic with no imports outside the standard
-library. Both are thoroughly unit-tested.
+`geometry.py` is pure math with no network or I/O dependencies, and is
+thoroughly unit-tested.
 
 ## Adding a camera
 
 The pipeline is camera-agnostic; onboarding a camera is configuration:
 
-1. **Register it** in `app/cameras.py` — camera ID, human-readable name, a
-   one-sentence scene description, and `expected_crosswalks`. The scene
-   description is the yardstick the triage prompt judges frames against.
+1. **Register it** in `app/cameras.py` — camera ID, human-readable name, and a
+   one-sentence scene description, which is the yardstick the triage prompt
+   judges frames against. There is no geometry to declare.
 2. **Schedule it** — create a Cloud Scheduler job targeting
    `/api/calibrate-scheduled?cameraId=NNNN`.
 3. **Wire the client** — add the camera to `LIVE_CAMERAS` in xwalk-keyboards
    (stream URL, segment anchors, reference calibration).
 
 An unregistered camera still calibrates with no code change — registering it
-sharpens the triage and caps the boundary count.
+sharpens the triage.
 
 ## Observability
 
@@ -448,7 +417,6 @@ over the source frame for eyeball checks.
 | `CALIBRATION_TRIAGE_MODEL` | `gemini-2.5-flash` | Gemini model for conditions triage |
 | `ROBOFLOW_API_KEY` | — | Roboflow API key |
 | `CALIBRATION_STRIPE_WORKFLOW_URL` | Roboflow serverless URL | Stripe detection workflow |
-| `CALIBRATION_BOUNDARY_WORKFLOW_URL` | Roboflow serverless URL | Boundary detection workflow |
 | `CALIBRATION_CAMERA_ID` | `5056` | Default camera for scheduled runs without `?cameraId` |
 | `CALIBRATION_SNAPSHOT_URL_TEMPLATE` | `https://511ny.org/map/Cctv/{camera_id}` | Snapshot URL pattern |
 | `CALIBRATION_AGENT_API_KEY` | — | API key for request authentication |
@@ -463,14 +431,12 @@ Keep all keys in Secret Manager for Cloud Run deployments.
 
 Unit tests cover:
 
-- **geometry** — stripe placement under occlusion and boundary jitter, pitch
-  estimation from sparse detections, phase-snapping stability
-- **continuity** — segment names survive occlusion and detection gaps, missing
-  segments trigger a regression hold, new cameras pass through untouched
-- **cameras** — registered cameras carry their scene and crosswalk count,
-  unregistered cameras get generic defaults, triage prompt specialization
-- **boundaries** — capping at the registered crosswalk count, fragment dropping,
-  survivor re-sorting by position
+- **geometry** — gap clustering into segments, positional segment naming,
+  ordinal indexing, threshold scaling with frame width, and both accepted
+  failure modes (occlusion over-split, narrow-median under-split)
+- **cameras** — registered cameras carry their scene, unregistered cameras get
+  generic defaults, triage prompt specialization, and an assertion that the
+  registry carries no geometry fields
 
 The triage prompt has assertion-level tests for its contract: status enum
 completeness, occlusion/visibility separation, dusk/shadow vocabulary, the

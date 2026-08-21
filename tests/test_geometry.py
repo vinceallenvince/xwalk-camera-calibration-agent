@@ -1,23 +1,32 @@
 """Tests for the camera-agnostic stripe geometry.
 
-The load-bearing claim is that a stripe's index describes where it sits on the
-crosswalk, not where it landed in the detection list. These tests occlude
-stripes and assert the survivors keep the indexes they had.
+Two load-bearing claims, both settled in VIN-44:
+
+  1. Segments are discovered from the stripes themselves — a gap along the
+     crosswalk axis larger than a fraction of the frame width starts a new
+     crosswalk run. No boundary polygon, no registered crosswalk count.
+  2. Indexes are ordinal within a segment, not positional on the paint. A
+     stripe the model missed does not leave a hole; its neighbours renumber.
+     That is a deliberate trade, so it is asserted rather than tolerated.
 """
 
 import math
 
 from app.geometry import (
-    assign_segments,
+    FALLBACK_FRAME_WIDTH,
+    SEGMENT_GAP_FRACTION,
     centroid,
-    estimate_pitch,
-    index_stripes,
-    point_in_polygon,
+    place_stripes,
     principal_axis,
+    project,
+    segment_name,
 )
 
 PITCH = 10.0
-COUNT = 18
+FRAME_WIDTH = 352.0
+# The gap that separates two crosswalk runs on a 352px frame: ~136px measured,
+# comfortably past the 88px threshold.
+RUN_GAP = 140.0
 
 
 def stripe_at(x: float, y: float = 129.0, angle: float = 0.0) -> dict:
@@ -29,187 +38,133 @@ def stripe_at(x: float, y: float = 129.0, angle: float = 0.0) -> dict:
     return {"polygon": [[cx, cy] for cx, cy in corners]}
 
 
-def crosswalk(angle: float = 0.0) -> list[list[float]]:
-    corners = [(0.0, 118.0), (180.0, 118.0), (180.0, 140.0), (0.0, 140.0)]
-    if angle:
-        cos_a, sin_a = math.cos(angle), math.sin(angle)
-        corners = [(cx * cos_a - cy * sin_a, cx * sin_a + cy * cos_a) for cx, cy in corners]
-    return [[cx, cy] for cx, cy in corners]
+def run_of(count: int, start: float = 5.0, angle: float = 0.0) -> list[dict]:
+    return [stripe_at(start + i * PITCH, angle=angle) for i in range(count)]
 
 
-def full_run(angle: float = 0.0) -> list[dict]:
-    return [stripe_at(5.0 + i * PITCH, angle=angle) for i in range(COUNT)]
+def placed(stripes: list[dict]) -> list[tuple[str, int]]:
+    result = place_stripes(stripes, FRAME_WIDTH)
+    return [(s["segment"], s["stripeIndex"]) for s in result]
 
 
-def indexes(stripes: list[dict]) -> list[int]:
-    return [s["stripeIndex"] for s in stripes]
+def segments(stripes: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for s in place_stripes(stripes, FRAME_WIDTH):
+        counts[s["segment"]] = counts.get(s["segment"], 0) + 1
+    return counts
+
+
+class TestClustering:
+    def test_two_runs_split_at_the_median(self):
+        stripes = run_of(6) + run_of(5, start=5.0 + RUN_GAP)
+        assert segments(stripes) == {"segment0": 6, "segment1": 5}
+
+    def test_one_run_stays_one_segment(self):
+        assert segments(run_of(12)) == {"segment0": 12}
+
+    def test_segments_are_named_along_the_axis(self):
+        """segment0 is the first run encountered along the principal axis, so
+        naming never depends on which crosswalk a camera happens to show."""
+        stripes = run_of(3, start=5.0 + RUN_GAP) + run_of(3)
+        result = place_stripes(stripes, FRAME_WIDTH)
+        first = [s for s in result if s["segment"] == "segment0"]
+        assert max(centroid(s["polygon"])[0] for s in first) < RUN_GAP
+
+    def test_three_runs_get_a_third_segment(self):
+        stripes = run_of(3) + run_of(3, start=200.0) + run_of(3, start=400.0)
+        assert segments(stripes) == {"segment0": 3, "segment1": 3, "segment2": 3}
+
+    def test_threshold_scales_with_frame_width(self):
+        """The same scene at double resolution must split the same way."""
+        small = run_of(4) + run_of(4, start=5.0 + RUN_GAP)
+        big = [
+            {"polygon": [[x * 2, y * 2] for x, y in s["polygon"]]}
+            for s in small
+        ]
+        assert (
+            [(s["segment"], s["stripeIndex"]) for s in place_stripes(big, FRAME_WIDTH * 2)]
+            == placed(small)
+        )
+
+    def test_occlusion_hole_over_splits_one_run(self):
+        """Accepted failure mode: a vehicle parked mid-run leaves a gap wider
+        than the threshold, so one crosswalk reads as two segments. Measured on
+        real frames (VIN-44) — asserted so the behaviour stays deliberate."""
+        stripes = run_of(3) + run_of(3, start=5.0 + RUN_GAP)
+        assert len(segments(stripes)) == 2
+
+    def test_narrow_median_under_splits_two_runs(self):
+        """The other accepted failure mode: crosswalks closer together than
+        the threshold merge into one segment."""
+        stripes = run_of(3) + run_of(3, start=5.0 + 40.0)
+        assert segments(stripes) == {"segment0": 6}
+
+    def test_no_frame_width_falls_back(self):
+        stripes = run_of(3) + run_of(3, start=5.0 + RUN_GAP)
+        assert place_stripes(stripes, None) == place_stripes(stripes, FALLBACK_FRAME_WIDTH)
+
+    def test_threshold_constant_is_the_validated_one(self):
+        """0.25 sits mid-plateau for both registered cameras (VIN-44 replay of
+        341 archived runs). Changing it needs a fresh replay, not a hunch."""
+        assert SEGMENT_GAP_FRACTION == 0.25
 
 
 class TestIndexing:
-    def test_evenly_spaced_stripes_get_consecutive_indexes(self):
-        result = index_stripes(crosswalk(), full_run())
-        assert indexes(result) == list(range(COUNT))
+    def test_indexes_are_contiguous_from_zero(self):
+        assert placed(run_of(5)) == [("segment0", i) for i in range(5)]
 
-    def test_half_slot_positions_do_not_collide(self):
-        """Banker's rounding would fold 0.5/1.5 into the same pair of slots."""
-        result = index_stripes(crosswalk(), full_run())
-        assert len(set(indexes(result))) == COUNT
+    def test_each_segment_restarts_at_zero(self):
+        stripes = run_of(4) + run_of(3, start=5.0 + RUN_GAP)
+        assert placed(stripes) == [
+            ("segment0", 0), ("segment0", 1), ("segment0", 2), ("segment0", 3),
+            ("segment1", 0), ("segment1", 1), ("segment1", 2),
+        ]
 
-    def test_occluded_leading_stripes_do_not_shift_the_rest(self):
-        """The bug this whole design exists to prevent.
+    def test_indexes_follow_the_axis_not_the_detection_order(self):
+        shuffled = [stripe_at(x) for x in (35.0, 5.0, 25.0, 15.0)]
+        result = place_stripes(shuffled, FRAME_WIDTH)
+        xs = [centroid(s["polygon"])[0] for s in result]
+        assert xs == sorted(xs)
+        assert [s["stripeIndex"] for s in result] == [0, 1, 2, 3]
 
-        A vehicle covering the first three bars must not transpose the
-        remaining fifteen down by three slots.
-        """
-        everything = index_stripes(crosswalk(), full_run())
-        occluded = index_stripes(crosswalk(), full_run()[3:])
+    def test_a_missing_stripe_renumbers_its_neighbours(self):
+        """The deliberate cost of ordinal indexing: gaps are NOT preserved.
+        Dropping the leading stripe shifts every index down by one."""
+        full = run_of(5)
+        assert placed(full[1:]) == [("segment0", i) for i in range(4)]
 
-        assert indexes(occluded) == indexes(everything)[3:]
+    def test_rotated_crosswalk_indexes_along_its_own_axis(self):
+        result = placed(run_of(6, angle=0.3))
+        assert result == [("segment0", i) for i in range(6)]
 
-    def test_occluded_middle_stripes_leave_a_gap(self):
-        partial = full_run()[:5] + full_run()[9:]
-        result = index_stripes(crosswalk(), partial)
+    def test_single_stripe(self):
+        assert placed([stripe_at(5.0)]) == [("segment0", 0)]
 
-        assert indexes(result) == [0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    def test_no_stripes(self):
+        assert place_stripes([], FRAME_WIDTH) == []
 
-    def test_sub_pitch_boundary_jitter_does_not_shift_indexes(self):
-        """The boundary edge wanders a few pixels between runs; indexes must not.
-
-        Phase correction absorbs any wobble smaller than one stripe pitch,
-        which is the regime real boundary detections live in.
-        """
-        baseline = index_stripes(crosswalk(), full_run())
-
-        for nudge in (-4.0, -2.0, 1.0, 3.0, 4.0):
-            jittered = [[0.0 + nudge, 118.0], [180.0 - nudge, 118.0],
-                        [180.0 - nudge, 140.0], [0.0 + nudge, 140.0]]
-            assert indexes(index_stripes(jittered, full_run())) == indexes(baseline), (
-                f"a {nudge}px boundary nudge shifted the indexes"
-            )
-
-    def test_full_pitch_boundary_shift_moves_indexes(self):
-        """A known and unavoidable limit, pinned so it stays visible.
-
-        If the boundary genuinely grows by a whole stripe pitch, there is no
-        way to tell that from a crosswalk that has one more stripe at the
-        leading edge, so every index moves by one. Sub-pitch noise is handled;
-        this is not. It only matters if the client treats index 0 as a fixed
-        musical anchor — worth knowing before it does.
-        """
-        tight = [[4.0, 118.0], [176.0, 118.0], [176.0, 140.0], [4.0, 140.0]]
-        loose = [[-6.0, 118.0], [186.0, 118.0], [186.0, 140.0], [-6.0, 140.0]]
-
-        tight_indexes = indexes(index_stripes(tight, full_run()))
-        loose_indexes = indexes(index_stripes(loose, full_run()))
-
-        assert tight_indexes != loose_indexes
-        # Uniformly shifted, never scrambled — spacing is still correct.
-        offset = loose_indexes[0] - tight_indexes[0]
-        assert loose_indexes == [i + offset for i in tight_indexes]
-
-    def test_works_on_a_tilted_crosswalk(self):
-        """Real crosswalks run diagonally across the frame."""
-        angle = math.radians(20)
-        result = index_stripes(crosswalk(angle), full_run(angle))
-        assert indexes(result) == list(range(COUNT))
-
-    def test_single_stripe_is_indexed_without_a_pitch_to_measure(self):
-        result = index_stripes(crosswalk(), [stripe_at(5.0)])
-        assert len(result) == 1
-        assert result[0]["stripeIndex"] >= 0
-
-    def test_no_stripes_returns_empty(self):
-        assert index_stripes(crosswalk(), []) == []
-
-    def test_missing_boundary_falls_back_to_stripe_extent(self):
-        result = index_stripes([], full_run())
-        assert indexes(result) == list(range(COUNT))
-
-    def test_original_fields_are_preserved(self):
-        stripes = [{**stripe_at(5.0), "segment": "left", "confidence": 0.9}]
-        result = index_stripes(crosswalk(), stripes)
-        assert result[0]["segment"] == "left"
+    def test_original_fields_survive(self):
+        result = place_stripes([{"polygon": stripe_at(5.0)["polygon"], "confidence": 0.9}], FRAME_WIDTH)
         assert result[0]["confidence"] == 0.9
 
-    def test_indexes_are_unique_even_when_pitch_is_underestimated(self):
-        """Two bars closer than the median pitch must still get distinct slots."""
-        crowded = full_run() + [stripe_at(6.0)]
-        result = index_stripes(crosswalk(), crowded)
-        assert len(set(indexes(result))) == len(result)
 
+class TestPrimitives:
+    def test_centroid_of_a_square(self):
+        assert centroid([[0, 0], [10, 0], [10, 10], [0, 10]]) == (5.0, 5.0)
 
-class TestPitch:
-    def test_median_gap_survives_a_missing_stripe(self):
-        # A hole at 30 makes one 20-wide gap; the median ignores it.
-        projections = [0.0, 10.0, 20.0, 40.0, 50.0, 60.0]
-        assert estimate_pitch(projections, 60.0) == PITCH
+    def test_centroid_of_nothing(self):
+        assert centroid([]) == (0.0, 0.0)
 
-    def test_two_stripes_spread_evenly(self):
-        assert estimate_pitch([0.0, 30.0], 30.0) == 30.0
-
-    def test_single_stripe_falls_back_to_span(self):
-        assert estimate_pitch([5.0], 180.0) == 180.0
-
-    def test_degenerate_span_still_returns_positive_pitch(self):
-        assert estimate_pitch([5.0], 0.0) > 0
-
-
-class TestAxis:
-    def test_horizontal_polygon(self):
-        axis = principal_axis(crosswalk())
+    def test_principal_axis_of_a_horizontal_run(self):
+        axis = principal_axis([[0, 0], [100, 0], [100, 5], [0, 5]])
         assert abs(abs(axis[0]) - 1.0) < 1e-6
 
-    def test_tilted_polygon_follows_the_tilt(self):
-        angle = math.radians(30)
-        axis = principal_axis(crosswalk(angle))
-        assert abs(abs(math.atan2(axis[1], axis[0])) - angle) < 1e-6
+    def test_principal_axis_of_a_vertical_run(self):
+        axis = principal_axis([[0, 0], [5, 0], [5, 100], [0, 100]])
+        assert abs(abs(axis[1]) - 1.0) < 1e-6
 
-    def test_degenerate_polygon_does_not_crash(self):
-        assert principal_axis([[1.0, 1.0]]) == (1.0, 0.0)
+    def test_projection_along_x(self):
+        assert project((3.0, 4.0), (1.0, 0.0)) == 3.0
 
-
-class TestSegments:
-    LEFT = [[0.0, 118.0], [180.0, 118.0], [180.0, 140.0], [0.0, 140.0]]
-    RIGHT = [[280.0, 130.0], [360.0, 130.0], [360.0, 160.0], [280.0, 160.0]]
-
-    def test_detections_land_in_the_boundary_that_contains_them(self):
-        detections = [{"x": 50.0, "y": 129.0}, {"x": 300.0, "y": 145.0}]
-        grouped = assign_segments(detections, {"left": self.LEFT, "right": self.RIGHT})
-
-        assert len(grouped["left"]) == 1
-        assert len(grouped["right"]) == 1
-
-    def test_detection_outside_every_boundary_goes_to_the_nearest(self):
-        """Paint spilling past a tight boundary should not be discarded."""
-        detections = [{"x": 190.0, "y": 129.0}]
-        grouped = assign_segments(detections, {"left": self.LEFT, "right": self.RIGHT})
-
-        assert len(grouped["left"]) == 1
-        assert len(grouped["right"]) == 0
-
-    def test_no_boundaries_groups_nothing(self):
-        assert assign_segments([{"x": 1.0, "y": 1.0}], {}) == {}
-
-    def test_every_detection_is_kept(self):
-        detections = [{"x": float(x), "y": 129.0} for x in range(0, 360, 20)]
-        grouped = assign_segments(detections, {"left": self.LEFT, "right": self.RIGHT})
-
-        assert sum(len(v) for v in grouped.values()) == len(detections)
-
-
-class TestPointInPolygon:
-    SQUARE = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
-
-    def test_inside(self):
-        assert point_in_polygon((5.0, 5.0), self.SQUARE)
-
-    def test_outside(self):
-        assert not point_in_polygon((15.0, 5.0), self.SQUARE)
-
-
-class TestCentroid:
-    def test_mean_of_vertices(self):
-        assert centroid([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]) == (5.0, 5.0)
-
-    def test_empty_polygon(self):
-        assert centroid([]) == (0.0, 0.0)
+    def test_segment_names_are_positional(self):
+        assert [segment_name(i) for i in range(3)] == ["segment0", "segment1", "segment2"]

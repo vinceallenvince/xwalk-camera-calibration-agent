@@ -3,10 +3,9 @@
 Every run:
   - Appends one row to BigQuery (the Looker Studio source).
   - Archives the JSON record AND the source frame to GCS history.
-  - When the run published (any visible stripes and no boundary-continuity
-    regression — see main.run_calibration), overwrites the current/ JSON that
-    the web client reads. The image is never written to current/ — the client
-    only needs polygons.
+  - When the run published (any visible stripes — see main.run_calibration),
+    overwrites the current/ JSON that the web client reads. The image is never
+    written to current/ — the client only needs polygons.
 
 GCS layout:
   calibration/
@@ -33,24 +32,6 @@ def _current_path(camera_id: int) -> str:
 
 def _history_path(camera_id: int, run_id: str, ext: str) -> str:
     return f"{GCS_PREFIX}/history/camera_{camera_id}/{run_id}.{ext}"
-
-
-def load_current(camera_id: int) -> dict[str, Any] | None:
-    """The last published calibration for this camera, or None.
-
-    This is the temporal memory for segment continuity: each run compares its
-    detected boundaries against what the web client is currently playing from.
-    Failing soft is deliberate — with no GCS access (local dev) or no prior
-    publish, a run simply behaves like a first sighting.
-    """
-    try:
-        from google.cloud import storage
-
-        bucket = storage.Client().bucket(BUCKET)
-        blob = bucket.blob(_current_path(camera_id))
-        return json.loads(blob.download_as_bytes())
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:

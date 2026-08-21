@@ -20,13 +20,10 @@ Calibration Agent (Cloud Run)
   │
   ├─ if crosswalk is visible:
   │
-  ├─ 2a. Roboflow Workflow — detect stripe polygons
-  │      Returns: 25 instance-segmentation polygons, paint-accurate
+  ├─ 2. Roboflow Workflow — detect stripe polygons
+  │     Returns: instance-segmentation polygons, paint-accurate
   │
-  ├─ 2b. Roboflow Workflow — detect crosswalk boundaries
-  │      Returns: left/right crosswalk bounding polygons
-  │
-  ├─ 3. Code: match detected polygons to reference stripe index/note
+  ├─ 3. Code: group stripes into segments, index each one
   │
   ▼
   BigQuery: append one row per run (Looker Studio source)
@@ -37,24 +34,21 @@ Calibration Agent (Cloud Run)
 
 **Roboflow** does the geometry — paint-accurate instance segmentation polygons in ~1s. This is the only approach tested that produced correct geometry on both crosswalks.
 
-**Code** does the bookkeeping — it places each detected bar on its crosswalk and hands back a position. It never decides what a bar sounds like.
+**Code** does the bookkeeping — it groups the detected bars into crosswalk segments and hands back a position for each. It never decides what a bar sounds like.
 
 ## Stripe positions, not notes
 
 The agent is camera-agnostic. The production path holds no reference calibration, expects no particular number of stripes, and emits no note names. Pointing it at a new camera needs no hand-authored geometry.
 
-Each published stripe carries a **`stripeIndex`**: its slot position along the crosswalk, measured from the boundary's leading edge in units of the stripe pitch. Two properties make that usable as an identity:
+Each published stripe carries a **`segment`** (which crosswalk run it belongs to) and a **`stripeIndex`** (its ordinal position within that run, 0-based). Both are derived from the detections alone:
 
-- It is measured against the **crosswalk boundary**, not the detection list, so a bar keeps its index when a vehicle hides its neighbours.
-- The pitch is the **median** gap between detections, which survives missing bars — one absent stripe makes a single double-width gap, and the median ignores it.
+- Stripe centroids are projected onto their principal axis and sorted.
+- A gap wider than 25% of the frame width starts a new segment — the separation between crosswalk runs is an order of magnitude larger than the spacing within one (medians of ~136px vs ~9px on a 352px frame).
+- Segments are named positionally along that axis: `segment0`, `segment1`, …
 
-Gaps in the index sequence are meaningful: they are bars the model could not see in that frame.
+**The client owns the music.** The web app anchors notes from a single per-camera base and numbers stripes globally across segments, so it plays an ascending scale as you cross. The agent only reports where the paint is.
 
-Crosswalk segments are named by their left-to-right order in the frame (`left`, `right`, then `segment3`…), so nothing depends on where a particular camera's crosswalks sit.
-
-**The client owns the music.** Mapping an index to a pitch is the web app's job — see `SCALE_BY_SEGMENT` in `src/lib/use-calibration.ts` in xwalk-keyboards. The agent only reports where the paint is.
-
-> **Known limit.** If a detected boundary grows or shrinks by a whole stripe pitch, every index shifts by one — genuinely indistinguishable from a crosswalk with one more bar at its leading edge. Sub-pitch noise, the realistic case, is cancelled by phase-snapping to the detections' own lattice. Treat the index as a stable *relative* position, not an absolute anchor. See [`app/geometry.py`](app/geometry.py).
+> **Identities wobble, deliberately.** Indexes are ordinal, so a bar the model could not see does not leave a hole — its neighbours renumber, and the scale transposes. The agent used to defend against this with boundary-anchored indexing and run-over-run segment continuity; that machinery was deleted in favour of a simpler pipeline, on the grounds that a transposed keyboard is still a keyboard and nobody crossing the street knows the mapping. Freshness — keys sitting on the paint — is the guarantee that was kept. See [`app/geometry.py`](app/geometry.py).
 
 ## API
 
@@ -75,7 +69,7 @@ Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY` is
 | `no_crosswalk` | No painted crosswalk visible at all — aimed somewhere without one, or fully obstructed | ✗ |
 | `feed_down` | Source outage (placeholder image) | ✗ |
 
-There is no `needs_review` status. A repositioned camera or re-striped paint is not an emergency in a camera-agnostic pipeline — the next run simply measures the new scene, with segment continuity (and its publish hold) guarding against renames. Those observations live in `conditions.cameraMoved` and `conditions.repaintSuspected` instead, and a re-aim that still shows crosswalks reports `degraded`, never `no_crosswalk`.
+There is no `needs_review` status. A repositioned camera or re-striped paint is not an emergency in a camera-agnostic pipeline — the next run simply measures the new scene. Those observations live in `conditions.cameraMoved` and `conditions.repaintSuspected` instead, and a re-aim that still shows crosswalks reports `degraded`, never `no_crosswalk`.
 
 Alongside `status`, triage reports two independent `conditions` axes: **`occlusion`** — what is physically covering the paint (`vehicle`, `construction`, `snow_cover`, …) — and **`visibility`** — the lighting or atmospheric factor reducing paint contrast (`shadows`, `dusk`, `glare`, `rain`, …). They are separate because they fail differently: an occluded stripe is hidden from any model, while low-contrast light quietly degrades detection recall. A week of run history showed dusk and late-day tree shadows cost more stripes than parked vehicles, while a streetlit night detects best of all — so `visibility` distinguishes `dusk` from `dark`, and neither is folded into an "obstruction".
 
@@ -103,14 +97,14 @@ Each stripe in it is pure geometry — a position and an outline, in source pixe
 
 ```jsonc
 {
-  "stripeIndex": 7,        // slot along the crosswalk, 0-based, per segment
-  "segment": "left",       // crosswalk name, left-to-right in the frame
+  "stripeIndex": 7,        // ordinal position within the segment, 0-based
+  "segment": "segment0",   // crosswalk run, numbered along the axis
   "polygon": [[x, y]],     // instance-segmentation outline
   "confidence": 0.93
 }
 ```
 
-Only detected stripes appear; there are no placeholder entries. `referenceFrame` gives the frame these coordinates were measured in, and consumers scale from it.
+Only detected stripes appear; there are no placeholder entries. Crosswalk boundary polygons are not published — the client hulls each segment's stripes when it needs an outline. `referenceFrame` gives the frame these coordinates were measured in, and consumers scale from it.
 
 Every run also archives its full JSON record and source frame to GCS history:
 
@@ -125,9 +119,8 @@ gs://xwalk-keyboards-01/calibration/history/camera_5056/<runId>.png
 app/
   main.py               FastAPI HTTP surface (health, calibrate, calibrate-scheduled)
   cameras.py            Per-camera registry (snapshot source + triage scene description)
-  tools.py              Gemini Flash conditions triage + Roboflow stripe/boundary detection
-  geometry.py           Camera-agnostic stripe placement (axis, pitch, slot indexing)
-  continuity.py         Run-over-run segment naming continuity (bbox IoU matching)
+  tools.py              Gemini Flash conditions triage + Roboflow stripe detection
+  geometry.py           Camera-agnostic stripe placement (axis, gap clustering, indexing)
   persist.py            BigQuery + GCS persistence
   coords.py             Normalized 0-1000 ↔ source pixel conversion, image size sniffing
   storage.py            GCS storage helpers
@@ -135,10 +128,8 @@ docs/
   plan.md               Architecture plan and design decisions
 images/                 Reference frames and comparison images
 tests/
-  test_geometry.py      Stripe placement under occlusion and boundary jitter
-  test_continuity.py    Segment names survive occlusion and detection gaps
+  test_geometry.py      Segment clustering and ordinal stripe indexing
   test_cameras.py       Per-camera registry and triage prompt specialization
-  test_boundaries.py    Boundary capping at the registered crosswalk count
   overlay.py            Draw an archived run's polygons over its frame
 ```
 
@@ -162,9 +153,8 @@ uv sync
 | `CALIBRATION_TRIAGE_MODEL` | `gemini-2.5-flash` | Gemini model for conditions triage |
 | `CALIBRATION_AGENT_MODEL` | `gemini-2.5-pro` | Gemini model for full calibration |
 | `CALIBRATION_UPSCALE` | `4` | Upscale factor before sending to Gemini |
-| `ROBOFLOW_API_KEY` | — | Roboflow API key for stripe/boundary detection |
+| `ROBOFLOW_API_KEY` | — | Roboflow API key for stripe detection |
 | `CALIBRATION_STRIPE_WORKFLOW_URL` | Roboflow serverless URL | Stripe detection workflow |
-| `CALIBRATION_BOUNDARY_WORKFLOW_URL` | Roboflow serverless URL | Boundary detection workflow |
 | `CALIBRATION_CAMERA_ID` | `5056` | Default camera for scheduled runs without `?cameraId` |
 | `CALIBRATION_SNAPSHOT_URL_TEMPLATE` | `https://511ny.org/map/Cctv/{camera_id}` | Snapshot URL pattern for cameras without an explicit `snapshot_url` in the registry |
 | `CALIBRATION_SNAPSHOT_URL` | — | Legacy override of the default camera's snapshot URL; prefer the registry/template |
@@ -207,7 +197,7 @@ The Dockerfile uses `uv sync --no-dev` to exclude test dependencies (pytest, Pil
 
 The pipeline itself is camera-agnostic; onboarding a camera is configuration:
 
-1. **Register it** in `app/cameras.py` — camera ID, human-readable name, a one-sentence scene description (what the frame shows when everything is normal; the triage prompt judges frames against it), and `expected_crosswalks` — how many painted crosswalks the scene actually shows. The count is a hard cap on published boundaries: occlusion can split one crosswalk into multiple detections, and without the cap a fragment gets published as a phantom segment. Continuity applies the same cap to the published baseline, so a phantom that slipped in is retired on the next run instead of holding publishes forever. Cameras on 511NY need no `snapshot_url` — the template derives it from the ID. An unregistered camera still calibrates, with a generic triage prompt and no crosswalk cap.
+1. **Register it** in `app/cameras.py` — camera ID, human-readable name, and a one-sentence scene description (what the frame shows when everything is normal; the triage prompt judges frames against it). There is no geometry to declare: segments are discovered from the detections every run. Cameras on 511NY need no `snapshot_url` — the template derives it from the ID. An unregistered camera still calibrates, with a generic triage prompt.
 2. **Schedule it** — create a Cloud Scheduler job targeting `/api/calibrate-scheduled?cameraId=NNNN`. One job per camera.
 3. **Wire the client** — add the camera to `LIVE_CAMERAS` in xwalk-keyboards (stream URL, segment anchors, reference calibration).
 

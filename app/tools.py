@@ -1,19 +1,18 @@
 """ADK tools for the calibration agent.
 
-Three tools, each doing what it is good at:
+Two tools, each doing what it is good at:
 
   analyse_conditions  — Gemini Flash classifies the frame and produces
                         status / conditions / reasoning (language).
-  detect_boundaries   — Roboflow workflow returns the crosswalk outlines,
-                        named left-to-right.
   detect_stripes      — Roboflow workflow returns paint-accurate instance
-                        segmentation polygons, placed along those crosswalks.
+                        segmentation polygons, grouped into crosswalk
+                        segments and indexed along each one.
 
-The agent decides whether to run detection based on the conditions result.
+The caller decides whether to run detection based on the conditions result.
 
 Nothing here is baked to a camera. Triage takes the camera's registered scene
-description as input (see app/cameras.py), crosswalks are named by their order
-in the frame, stripes are indexed by position along their crosswalk, and no
+description as input (see app/cameras.py), segments are named by their order
+along the crosswalk axis, stripes are indexed within their segment, and no
 reference calibration is consulted — so pointing this at a new camera needs no
 hand-authored geometry.
 """
@@ -29,7 +28,7 @@ from google import genai
 from google.genai import types
 
 from app.cameras import CameraConfig
-from app.geometry import assign_segments, index_stripes
+from app.geometry import place_stripes
 
 # ---------------------------------------------------------------------------
 # Gemini — conditions triage
@@ -202,21 +201,11 @@ STRIPE_WORKFLOW_URL = os.environ.get(
     "CALIBRATION_STRIPE_WORKFLOW_URL",
     "https://serverless.roboflow.com/vince-vinceallen-com/workflows/crosswalk-stripe-detection-1786299496725",
 )
-BOUNDARY_WORKFLOW_URL = os.environ.get(
-    "CALIBRATION_BOUNDARY_WORKFLOW_URL",
-    "https://serverless.roboflow.com/vince-vinceallen-com/workflows/crosswalk-boundary-detection-1786302696881",
-)
-BOUNDARY_MIN_CONFIDENCE = 0.8
-BOUNDARY_MIN_WIDTH = 30
 MAX_WIDTH = 50
 MIN_HEIGHT = 5
 MIN_CONFIDENCE = 0.5
 MIN_CENTROID_DIST = 5.0
 MIN_POLYGON_POINTS = 3
-
-# Segment names, assigned in left-to-right order of the detected crosswalk
-# boundaries. Extra crosswalks beyond these fall back to "segment3", "segment4"…
-SEGMENT_NAMES = ("left", "right")
 
 
 def _dedup(detections: list[dict]) -> list[dict]:
@@ -230,111 +219,21 @@ def _dedup(detections: list[dict]) -> list[dict]:
     return sorted(kept, key=lambda d: d["x"])
 
 
-def _segment_name(position: int) -> str:
-    """Name the nth crosswalk, counting from the left of the frame."""
-    if position < len(SEGMENT_NAMES):
-        return SEGMENT_NAMES[position]
-    return f"segment{position + 1}"
-
-
-def largest_boundaries(detections: list[dict], count: int | None) -> list[dict]:
-    """Keep the `count` largest detections by bounding-box area, in x order.
-
-    Occlusion can split one crosswalk into multiple detected boundaries — a
-    truck parked mid-crosswalk leaves two disconnected patches of paint, and
-    each becomes its own detection. When the camera's real crosswalk count is
-    known, everything beyond it is a fragment: keep the largest boundaries
-    (a fragment is always smaller than the crosswalk it broke off of) and
-    drop the rest, so a phantom segment can never be published.
-    """
-    if count is None or len(detections) <= count:
-        return detections
-    kept = sorted(detections, key=lambda d: -(d.get("width", 0) * d.get("height", 0)))[:count]
-    return sorted(kept, key=lambda d: d["x"])
-
-
-def confident_boundaries(preds: list[dict], min_confidence: float | None = None) -> list[dict]:
-    """Keep only high-confidence, wide detections, in x order.
-
-    These are the real crosswalks, not painted fragments elsewhere in the
-    frame. The confidence bar is per-camera: the zero-shot boundary model is
-    sure of itself on 5056's close-up view but reads 5072's farther crosswalk
-    at 0.55–0.79 even in good light, so one global threshold tuned to the
-    first camera silently discarded the second camera's paint (VIN-39).
-    """
-    threshold = BOUNDARY_MIN_CONFIDENCE if min_confidence is None else min_confidence
-    return sorted(
-        [p for p in preds if p.get("confidence", 0) >= threshold and p.get("width", 0) >= BOUNDARY_MIN_WIDTH],
-        key=lambda p: p["x"],
-    )
-
-
-def detect_boundaries(
-    image_bytes: bytes,
-    max_crosswalks: int | None = None,
-    min_confidence: float | None = None,
-) -> dict[str, Any]:
-    """Detect the crosswalk boundary polygons using Roboflow.
-
-    Boundaries are named by their left-to-right order in the frame rather than
-    by fixed pixel ranges, so this works on any camera regardless of where the
-    crosswalks sit or how many there are. `max_crosswalks` is the camera's
-    registered crosswalk count — see largest_boundaries. `min_confidence` is
-    the camera's boundary confidence bar — see confident_boundaries.
-
-    Why the stripe pass wants boundaries at all: the boundary provides an
-    origin that doesn't move when leading stripes are hidden, and a partition
-    when the gap between crosswalks is occluded. Both are memory of what the
-    crosswalk looks like when you can't currently see all of it — everything
-    else in geometry.py can be recovered from the visible stripes alone.
-    """
-    b64 = base64.b64encode(image_bytes).decode()
-
-    with httpx.Client(timeout=30) as client:
-        resp = client.post(BOUNDARY_WORKFLOW_URL, json={
-            "api_key": ROBOFLOW_API_KEY,
-            "inputs": {"image": {"type": "base64", "value": b64}},
-        })
-        resp.raise_for_status()
-
-    output = resp.json()["outputs"][0]
-    preds = output["predictions"].get("predictions", [])
-
-    real = largest_boundaries(confident_boundaries(preds, min_confidence), max_crosswalks)
-
-    crosswalks: dict[str, list[list[float]]] = {}
-    for position, det in enumerate(real):
-        polygon = [[pt["x"], pt["y"]] for pt in det.get("points", [])]
-        if len(polygon) >= MIN_POLYGON_POINTS:
-            crosswalks[_segment_name(position)] = polygon
-
-    return {
-        "crosswalks": crosswalks,
-        # Flattened aliases for the published schema, which names the first two.
-        "leftCrosswalk": crosswalks.get("left", []),
-        "rightCrosswalk": crosswalks.get("right", []),
-        "raw_count": len(preds),
-        "filtered_count": len(real),
-    }
-
-
-def detect_stripes(
-    image_bytes: bytes,
-    boundaries: dict[str, list[list[float]]] | None = None,
-) -> dict[str, Any]:
+def detect_stripes(image_bytes: bytes) -> dict[str, Any]:
     """Detect crosswalk stripes and place each one along its crosswalk.
 
     Every stripe Roboflow returns is published. There is no reference
     calibration to match against and no expected count to satisfy — the agent
     reports the geometry it can see, and the client decides what to do with it.
 
-    Each stripe carries a `stripeIndex`: its slot position measured from the
-    crosswalk's leading edge in units of the stripe pitch. The index is
-    positional, not ordinal, so a stripe keeps the same index when a vehicle
-    hides its neighbours. Missing indexes mean stripes the model could not see.
+    Each stripe carries a `segment` (which crosswalk run it belongs to, named
+    positionally along the axis) and a `stripeIndex` (its ordinal position
+    within that segment). Both come from the detections themselves — see
+    geometry.place_stripes. Nothing is measured against a boundary polygon and
+    nothing is carried over from the previous run.
 
-    Notes are deliberately absent. The stripe index is the whole identity; the
-    client owns the mapping from index to pitch.
+    Notes are deliberately absent. Segment and index are the whole identity;
+    the client owns the mapping from index to pitch.
     """
     b64 = base64.b64encode(image_bytes).decode()
 
@@ -357,36 +256,24 @@ def detect_stripes(
     ]
     clean = _dedup(filtered)
 
-    crosswalks = boundaries or {}
-    grouped = (
-        assign_segments(clean, crosswalks)
-        if crosswalks
-        # With no boundary to group by, the whole frame is one crosswalk.
-        else {"left": clean}
-    )
+    reference_frame = preds.get("image", {})
 
-    stripes: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     confidences: list[float] = []
-    segment_counts: dict[str, int] = {}
+    for det in clean:
+        polygon = [[pt["x"], pt["y"]] for pt in det.get("points", [])]
+        if len(polygon) < MIN_POLYGON_POINTS:
+            continue
+        confidence = det.get("confidence", 0)
+        confidences.append(confidence)
+        candidates.append({"polygon": polygon, "confidence": confidence})
 
-    for name, detections in grouped.items():
-        candidates = []
-        for det in detections:
-            polygon = [[pt["x"], pt["y"]] for pt in det.get("points", [])]
-            if len(polygon) < MIN_POLYGON_POINTS:
-                continue
-            confidence = det.get("confidence", 0)
-            confidences.append(confidence)
-            candidates.append({
-                "segment": name,
-                "polygon": polygon,
-                "confidence": confidence,
-            })
-
-        segment_counts[name] = len(candidates)
-        stripes.extend(index_stripes(crosswalks.get(name, []), candidates))
-
+    stripes = place_stripes(candidates, reference_frame.get("width"))
     stripes.sort(key=lambda s: (s["segment"], s["stripeIndex"]))
+
+    segment_counts: dict[str, int] = {}
+    for stripe in stripes:
+        segment_counts[stripe["segment"]] = segment_counts.get(stripe["segment"], 0) + 1
 
     return {
         "stripes": stripes,
@@ -397,5 +284,5 @@ def detect_stripes(
         "min_confidence": min(confidences) if confidences else 0,
         "mean_confidence": round(statistics.mean(confidences), 4) if confidences else 0,
         "raw_count": len(raw),
-        "referenceFrame": preds.get("image", {}),
+        "referenceFrame": reference_frame,
     }
