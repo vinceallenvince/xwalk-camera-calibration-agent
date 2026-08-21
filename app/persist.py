@@ -45,6 +45,9 @@ def _history_path(camera_id: int, run_id: str, ext: str) -> str:
 # test_persist.py pins the shape against exactly that.
 CURRENT_KEYS = (
     ("cameraId", "cameraId"),
+    # Correlates a published calibration with its BigQuery row and its
+    # history JSON, which otherwise can only be matched by timestamp.
+    ("runId", "runId"),
     ("updatedAt", "createdAt"),
     ("status", "status"),
     ("reasoning", "reasoning"),
@@ -55,9 +58,23 @@ CURRENT_KEYS = (
 )
 
 
-def current_payload(record: dict[str, Any]) -> dict[str, Any]:
-    """The calibration the web client reads, projected from a run record."""
-    return {published: record.get(source) for published, source in CURRENT_KEYS}
+def current_payload(
+    record: dict[str, Any],
+    frame_uri: str | None = None,
+) -> dict[str, Any]:
+    """The calibration the web client reads, projected from a run record.
+
+    `frame_uri` is where this run's source frame was archived, if it was. It
+    is passed in rather than read from the record because only save() knows
+    it: the extension is content-sniffed at upload time, so the path cannot
+    be derived from the run id alone. Absent when the run archived no frame
+    (or the upload failed) — the key is then omitted rather than published as
+    null, so a reader never gets a path to an object that is not there.
+    """
+    payload = {published: record.get(source) for published, source in CURRENT_KEYS}
+    if frame_uri:
+        payload["frameUri"] = frame_uri
+    return payload
 
 
 def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
@@ -132,8 +149,10 @@ def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
             bucket = gcs.Client().bucket(BUCKET)
             path = _current_path(record["cameraId"])
 
+            # history_frame is set only after the frame upload succeeds, so
+            # it doubles as the "was a frame actually archived" flag.
             bucket.blob(path).upload_from_string(
-                json.dumps(current_payload(record), indent=2),
+                json.dumps(current_payload(record, result.get("history_frame")), indent=2),
                 content_type="application/json",
             )
             result["current"] = f"gs://{BUCKET}/{path}"
