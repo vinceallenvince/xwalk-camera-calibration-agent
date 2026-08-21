@@ -34,6 +34,32 @@ def _history_path(camera_id: int, run_id: str, ext: str) -> str:
     return f"{GCS_PREFIX}/history/camera_{camera_id}/{run_id}.{ext}"
 
 
+# The keys the web client reads from current/. This is an allowlist, not a
+# copy of the record: everything the client does not need (timings, token
+# usage, raw counts) stays in the history archive and BigQuery.
+#
+# It is deliberately a separate list, so adding a field to the record does not
+# silently widen the public payload. The cost is that it can drift the other
+# way — VIN-46 removed the boundary polygons from the record but left them
+# named here, so every run published `"leftCrosswalk": null` until VIN-49.
+# test_persist.py pins the shape against exactly that.
+CURRENT_KEYS = (
+    ("cameraId", "cameraId"),
+    ("updatedAt", "createdAt"),
+    ("status", "status"),
+    ("reasoning", "reasoning"),
+    ("conditions", "conditions"),
+    ("confidence", "confidence"),
+    ("referenceFrame", "referenceFrame"),
+    ("stripes", "stripes"),
+)
+
+
+def current_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """The calibration the web client reads, projected from a run record."""
+    return {published: record.get(source) for published, source in CURRENT_KEYS}
+
+
 def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
     """Append to BigQuery, archive to GCS history, and optionally publish.
 
@@ -106,22 +132,9 @@ def save(record: dict[str, Any], frame: bytes | None = None) -> dict[str, Any]:
             bucket = gcs.Client().bucket(BUCKET)
             path = _current_path(record["cameraId"])
 
-            calibration = {
-                "cameraId": record["cameraId"],
-                "updatedAt": record["createdAt"],
-                "status": record["status"],
-                "reasoning": record["reasoning"],
-                "conditions": record["conditions"],
-                "confidence": record["confidence"],
-                "referenceFrame": record.get("referenceFrame"),
-                # No boundary polygons: segments are gap-clustered from the
-                # stripes, and the client hulls each segment's stripes when it
-                # needs an outline. The old crosswalks / leftCrosswalk /
-                # rightCrosswalk keys are gone rather than null — see VIN-46.
-                "stripes": record.get("stripes"),
-            }
             bucket.blob(path).upload_from_string(
-                json.dumps(calibration, indent=2), content_type="application/json",
+                json.dumps(current_payload(record), indent=2),
+                content_type="application/json",
             )
             result["current"] = f"gs://{BUCKET}/{path}"
         except Exception as exc:  # noqa: BLE001
