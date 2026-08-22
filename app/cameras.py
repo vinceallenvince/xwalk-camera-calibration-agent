@@ -46,6 +46,18 @@ CAMERAS: dict[int, CameraConfig] = {
         name="511NY View 5056 (West Street at W. 34 St, Manhattan)",
         scene="This camera shows two crosswalks separated by a bollard median.",
     ),
+    5059: CameraConfig(
+        camera_id=5059,
+        name="511NY View 5059 (West Street at W. 23 St, Manhattan)",
+        scene=(
+            "This camera shows two crosswalks separated by a wide planted "
+            "median carrying grass, a large tree, and a signal pole; the "
+            "tree's canopy and the shadow it casts fall across the middle of "
+            "the frame. Both crosswalks continue past the left and right "
+            "edges of the frame, so seeing only part of each one is normal — "
+            "all of that is the scene, not an obstruction or a feed problem."
+        ),
+    ),
     5072: CameraConfig(
         camera_id=5072,
         name="511NY View 5072 (West Street at Chambers St, Manhattan)",
