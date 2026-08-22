@@ -25,6 +25,20 @@ class TestRegistry:
         assert "9999" in config.name
         assert config.frame_url == "https://511ny.org/map/Cctv/9999"
 
+    def test_5059_is_registered_with_its_own_scene(self):
+        config = camera_config(5059)
+        assert config is CAMERAS[5059]
+        assert "W. 23 St" in config.name
+        assert "planted" in config.scene
+        assert "large tree" in config.scene
+
+    def test_5059_scene_calls_the_frame_edge_truncation_normal(self):
+        """Both crosswalks run off the sides of 5059's frame. Without this in
+        the scene, triage reads a permanently partial view as something wrong
+        with the camera — but publishing is gated on detection, and a partial
+        read is a correct read."""
+        assert "continue past the left and right" in camera_config(5059).scene
+
     def test_5072_is_registered_with_its_own_scene(self):
         config = camera_config(5072)
         assert config is CAMERAS[5072]
@@ -61,6 +75,16 @@ class TestTriagePrompt:
         assert "5056" not in prompt
         assert "bollard" not in prompt
         assert "4321" in prompt
+
+    def test_prompt_carries_5059s_own_scene_not_a_neighbours(self):
+        """5056, 5059, and 5072 all watch West Street and all show two
+        crosswalks, which makes cross-contamination easy to miss: each must be
+        judged against its own median."""
+        prompt = conditions_instruction(camera_config(5059))
+        assert "View 5059" in prompt
+        assert "large tree" in prompt
+        assert "bollard" not in prompt
+        assert "mounting" not in prompt
 
     def test_prompt_keeps_the_status_contract(self):
         prompt = conditions_instruction(camera_config(4321))

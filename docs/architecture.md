@@ -238,8 +238,11 @@ unregistered camera still calibrates with a generic triage prompt;
 registering it sharpens the triage.
 
 Currently registered: **View 5056** (West Street at W. 34 St, Manhattan),
-two crosswalks separated by a bollard median; and **View 5072** (West Street
-at Chambers St, Manhattan), two crosswalks separated by a planted median.
+two crosswalks separated by a bollard median; **View 5059** (West Street at
+W. 23 St, Manhattan), two crosswalks separated by a wide planted median with
+a large tree, both running off the sides of the frame; and **View 5072**
+(West Street at Chambers St, Manhattan), two crosswalks separated by a
+planted median.
 
 ## Status model
 
