@@ -105,6 +105,7 @@ def run_calibration(
     record: dict[str, Any] = {
         "runId": run_id,
         "cameraId": camera_id,
+        "crosswalk_rank": camera.crosswalk_rank,
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "status": status,
         "reasoning": reasoning,

@@ -51,7 +51,16 @@ class TestRegistry:
         never declares a crosswalk count or a detection threshold. Adding one
         back would reintroduce the per-camera tuning VIN-44 deleted."""
         fields = set(CameraConfig.__dataclass_fields__)
-        assert fields == {"camera_id", "name", "scene", "snapshot_url"}
+        assert fields == {"camera_id", "name", "scene", "snapshot_url", "crosswalk_rank"}
+
+    def test_crosswalk_rank_initial_assignments(self):
+        """VIN-70: 5059 is rank 1 (best composition), 5072 and 5056 are 3."""
+        assert camera_config(5059).crosswalk_rank == 1
+        assert camera_config(5072).crosswalk_rank == 3
+        assert camera_config(5056).crosswalk_rank == 3
+
+    def test_unregistered_camera_gets_default_rank(self):
+        assert camera_config(9999).crosswalk_rank == 3
 
     def test_explicit_snapshot_url_wins_over_the_template(self):
         config = CameraConfig(
