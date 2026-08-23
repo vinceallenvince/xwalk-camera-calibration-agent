@@ -45,6 +45,9 @@ def _history_path(camera_id: int, run_id: str, ext: str) -> str:
 # test_persist.py pins the shape against exactly that.
 CURRENT_KEYS = (
     ("cameraId", "cameraId"),
+    # Composition quality for homepage ordering (1 = best); the web app
+    # sorts camera links by this value ascending.
+    ("crosswalk_rank", "crosswalk_rank"),
     # Correlates a published calibration with its BigQuery row and its
     # history JSON, which otherwise can only be matched by timestamp.
     ("runId", "runId"),

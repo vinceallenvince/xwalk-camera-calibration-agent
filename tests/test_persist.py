@@ -17,6 +17,7 @@ from app.persist import CURRENT_KEYS, current_payload
 RECORD = {
     "runId": "run-20260821T120000Z-abc123",
     "cameraId": 5072,
+    "crosswalk_rank": 3,
     "createdAt": "2026-08-21T12:00:00+00:00",
     "status": "degraded",
     "reasoning": "Bus occluding the far crosswalk.",
@@ -39,6 +40,7 @@ RECORD = {
 NO_CROSSWALK_RECORD = {
     "runId": "run-20260823T120000Z-def456",
     "cameraId": 5056,
+    "crosswalk_rank": 3,
     "createdAt": "2026-08-23T12:00:00+00:00",
     "status": "no_crosswalk",
     "reasoning": "Camera rotated to a traffic-only view with no crosswalk visible.",
@@ -64,6 +66,7 @@ NO_CROSSWALK_RECORD = {
 FEED_DOWN_RECORD = {
     "runId": "run-20260823T130000Z-ghi789",
     "cameraId": 5056,
+    "crosswalk_rank": 3,
     "createdAt": "2026-08-23T13:00:00+00:00",
     "status": "feed_down",
     "reasoning": "Source outage — placeholder image detected.",
@@ -98,6 +101,7 @@ class TestPublishedShape:
     def test_carries_what_the_client_reads(self):
         payload = current_payload(RECORD)
         assert payload["cameraId"] == 5072
+        assert payload["crosswalk_rank"] == 3
         assert payload["updatedAt"] == RECORD["createdAt"]
         assert payload["status"] == "degraded"
         assert payload["referenceFrame"] == {"width": 352, "height": 240}

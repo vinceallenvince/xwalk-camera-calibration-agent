@@ -34,6 +34,9 @@ class CameraConfig:
     scene: str
     # Explicit snapshot source; cameras on the 511NY template can omit it.
     snapshot_url: str | None = None
+    # Composition quality for homepage ordering (1 = best, 5 = worst).
+    # The web app sorts camera links by this value ascending.
+    crosswalk_rank: int = 3
 
     @property
     def frame_url(self) -> str:
@@ -45,10 +48,12 @@ CAMERAS: dict[int, CameraConfig] = {
         camera_id=5056,
         name="511NY View 5056 (West Street at W. 34 St, Manhattan)",
         scene="This camera shows two crosswalks separated by a bollard median.",
+        crosswalk_rank=3,
     ),
     5059: CameraConfig(
         camera_id=5059,
         name="511NY View 5059 (West Street at W. 23 St, Manhattan)",
+        crosswalk_rank=1,
         scene=(
             "This camera shows two crosswalks separated by a wide planted "
             "median carrying grass, a large tree, and a signal pole; the "
@@ -61,6 +66,7 @@ CAMERAS: dict[int, CameraConfig] = {
     5072: CameraConfig(
         camera_id=5072,
         name="511NY View 5072 (West Street at Chambers St, Manhattan)",
+        crosswalk_rank=3,
         scene=(
             "This camera shows two crosswalks separated by a planted median "
             "with trees and bollards. Part of the camera's own mounting "
