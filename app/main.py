@@ -89,13 +89,17 @@ def run_calibration(
 
     # Step 3: Determine publishability.
     #
-    # Gemini has already rejected frames with no crosswalk, so any stripes
-    # Roboflow returns describe real paint. Occlusion varies frame to frame
-    # and a partial read is still a correct read — each stripe carries its own
-    # position, so the client renders what it is given without needing a
-    # complete set. Any run that saw a stripe publishes.
+    # Any status except feed_down publishes. When stripes were detected, we
+    # publish those stripes. When the camera has rotated away (no_crosswalk),
+    # we publish an empty stripes array so the client knows to disable the
+    # keyboard rather than serving a stale calibration from a different
+    # viewport. feed_down is the sole exception: a transient source outage
+    # tells us nothing about the scene, so freezing at the last good read
+    # is correct.
     visible = (detection_result or {}).get("visible_count", 0)
-    should_publish = detection_result is not None and visible > 0
+    should_publish = status != "feed_down" and (
+        visible > 0 or status == "no_crosswalk"
+    )
     elapsed_ms = round((time.monotonic() - started) * 1000)
 
     record: dict[str, Any] = {
@@ -107,7 +111,7 @@ def run_calibration(
         "conditions": conditions,
         "confidence": confidence,
         "referenceFrame": (detection_result or {}).get("referenceFrame") or _frame_size(image),
-        "stripes": (detection_result or {}).get("stripes"),
+        "stripes": (detection_result or {}).get("stripes") or [],
         "stripe_count": (detection_result or {}).get("stripe_count"),
         "visible_count": visible,
         "max_confidence": (detection_result or {}).get("max_confidence"),

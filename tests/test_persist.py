@@ -33,6 +33,59 @@ RECORD = {
     "storage": {"bigquery": "..."},
 }
 
+# A no_crosswalk run: the camera rotated away, Gemini reported no crosswalk,
+# Roboflow was skipped, and the agent publishes an empty stripes array so the
+# client knows to disable the keyboard rather than freezing at a stale read.
+NO_CROSSWALK_RECORD = {
+    "runId": "run-20260823T120000Z-def456",
+    "cameraId": 5056,
+    "createdAt": "2026-08-23T12:00:00+00:00",
+    "status": "no_crosswalk",
+    "reasoning": "Camera rotated to a traffic-only view with no crosswalk visible.",
+    "conditions": {"crosswalkVisible": False, "occlusion": "none",
+                   "visibility": "clear", "cameraMoved": "significant",
+                   "repaintSuspected": False},
+    "confidence": 0.95,
+    "referenceFrame": {"width": 352, "height": 240},
+    "stripes": [],
+    "stripe_count": 0,
+    "visible_count": 0,
+    "max_confidence": None,
+    "min_confidence": None,
+    "mean_confidence": None,
+    "matching_notes": None,
+    "model": "gemini-2.5-flash",
+    "elapsed_ms": 1200,
+    "gemini_tokens": 800,
+    "published": True,
+    "storage": {"bigquery": "..."},
+}
+
+FEED_DOWN_RECORD = {
+    "runId": "run-20260823T130000Z-ghi789",
+    "cameraId": 5056,
+    "createdAt": "2026-08-23T13:00:00+00:00",
+    "status": "feed_down",
+    "reasoning": "Source outage — placeholder image detected.",
+    "conditions": {"crosswalkVisible": False, "occlusion": "none",
+                   "visibility": "clear", "cameraMoved": "none",
+                   "repaintSuspected": False},
+    "confidence": 0.99,
+    "referenceFrame": {"width": 352, "height": 240},
+    "stripes": [],
+    "stripe_count": 0,
+    "visible_count": 0,
+    "max_confidence": None,
+    "min_confidence": None,
+    "mean_confidence": None,
+    "matching_notes": None,
+    "model": "gemini-2.5-flash",
+    "elapsed_ms": 800,
+    "gemini_tokens": 600,
+    "published": False,
+    "storage": {"bigquery": "..."},
+}
+
 
 class TestPublishedShape:
     def test_no_boundary_keys(self):
@@ -182,3 +235,47 @@ class TestSaveWiring:
 
         assert not [k for k in uploads if k.startswith("calibration/current/")]
         assert [k for k in uploads if k.startswith("calibration/history/")]
+
+
+class TestNoCrosswalkPublish:
+    """VIN-62: when 511NY rotates a camera away from the crosswalk, the agent
+    publishes an empty-stripes calibration so the client disables the keyboard
+    rather than freezing at a stale calibration from a different viewport."""
+
+    def test_no_crosswalk_publishes_empty_stripes(self):
+        payload = current_payload(NO_CROSSWALK_RECORD)
+        assert payload["stripes"] == []
+        assert payload["status"] == "no_crosswalk"
+
+    def test_no_crosswalk_carries_reference_frame(self):
+        """The client needs referenceFrame even with zero stripes — it sizes
+        the viewport from it."""
+        payload = current_payload(NO_CROSSWALK_RECORD)
+        assert payload["referenceFrame"] == {"width": 352, "height": 240}
+
+    def test_no_crosswalk_shape_matches_allowlist(self):
+        assert set(current_payload(NO_CROSSWALK_RECORD)) == {pub for pub, _ in CURRENT_KEYS}
+
+    def test_no_crosswalk_writes_to_current(self, monkeypatch):
+        uploads = TestSaveWiring._stub(monkeypatch)
+        persist.save(NO_CROSSWALK_RECORD, frame=b"\x89PNG\r\n\x1a\n rest")
+
+        current = [k for k in uploads if k.startswith("calibration/current/")]
+        assert len(current) == 1
+        published = json.loads(uploads[current[0]])
+        assert published["stripes"] == []
+        assert published["status"] == "no_crosswalk"
+
+    def test_feed_down_does_not_publish(self, monkeypatch):
+        uploads = TestSaveWiring._stub(monkeypatch)
+        persist.save(FEED_DOWN_RECORD, frame=b"\x89PNG\r\n\x1a\n rest")
+
+        current = [k for k in uploads if k.startswith("calibration/current/")]
+        assert current == [], "feed_down must not write to current/"
+
+    def test_feed_down_still_archives(self, monkeypatch):
+        uploads = TestSaveWiring._stub(monkeypatch)
+        persist.save(FEED_DOWN_RECORD, frame=b"\x89PNG\r\n\x1a\n rest")
+
+        history = [k for k in uploads if k.startswith("calibration/history/")]
+        assert len(history) >= 1, "feed_down runs must still archive to history"
