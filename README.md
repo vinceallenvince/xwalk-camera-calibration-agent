@@ -66,16 +66,16 @@ Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY` is
 |--------|---------|------------|
 | `ok` | The crosswalks in view are clearly visible, normal conditions | ✓ |
 | `degraded` | Visible but conditions reduced — occlusion, shadows, dusk light, glare, or a view that no longer matches the registered scene | ✓ |
-| `no_crosswalk` | No painted crosswalk visible at all — aimed somewhere without one, or fully obstructed | ✗ |
+| `no_crosswalk` | No painted crosswalk visible at all — aimed somewhere without one, or fully obstructed | ✓ (empty) |
 | `feed_down` | Source outage (placeholder image) | ✗ |
 
 There is no `needs_review` status. A repositioned camera or re-striped paint is not an emergency in a camera-agnostic pipeline — the next run simply measures the new scene. Those observations live in `conditions.cameraMoved` and `conditions.repaintSuspected` instead, and a re-aim that still shows crosswalks reports `degraded`, never `no_crosswalk`.
 
 Alongside `status`, triage reports two independent `conditions` axes: **`occlusion`** — what is physically covering the paint (`vehicle`, `construction`, `snow_cover`, …) — and **`visibility`** — the lighting or atmospheric factor reducing paint contrast (`shadows`, `dusk`, `glare`, `rain`, …). They are separate because they fail differently: an occluded stripe is hidden from any model, while low-contrast light quietly degrades detection recall. A week of run history showed dusk and late-day tree shadows cost more stripes than parked vehicles, while a streetlit night detects best of all — so `visibility` distinguishes `dusk` from `dark`, and neither is folded into an "obstruction".
 
-Publishing is gated on **detection, not classification**. Gemini has already rejected frames with no crosswalk in them, so any stripes Roboflow returns describe real paint — a run publishes whenever it detected at least one stripe.
+Publishing is gated on **status, not stripe count**. Any status except `feed_down` publishes. When stripes are detected, they publish as before. When the camera has rotated away (`no_crosswalk`), the agent publishes `stripes: []` so the client disables the keyboard rather than freezing at a stale calibration from a different viewport. `feed_down` is the sole non-publishing status: a transient source outage tells us nothing about the scene.
 
-This is deliberate. Occlusion varies frame to frame, and a partial read is still a correct read: every stripe carries its own position, so the client renders what it is given without needing a complete set. An earlier version required the detected stripe count to match a 25-stripe reference exactly, which rejected **346 consecutive runs** between 2026-08-11 and 2026-08-14 while the camera drifted — the web app kept serving a stale calibration that no longer sat on the paint.
+This is deliberate. 511NY cameras rotate their viewport presets on an unknown schedule — a camera pointing at a crosswalk at noon may be pointing at traffic by the afternoon. The previous gate (≥1 detected stripe) left the live calibration frozen at the last crosswalk-facing frame, so the web app showed "KEYBOARD READY!" with stale polygons overlaid on a scene with no paint in it. Occlusion varies frame to frame, and a partial read is still a correct read: every stripe carries its own position, so the client renders what it is given without needing a complete set. An earlier version required the detected stripe count to match a 25-stripe reference exactly, which rejected **346 consecutive runs** between 2026-08-11 and 2026-08-14 while the camera drifted — the web app kept serving a stale calibration that no longer sat on the paint.
 
 Runs that publish nothing are still recorded in BigQuery and archived to GCS history, leaving the live calibration untouched.
 

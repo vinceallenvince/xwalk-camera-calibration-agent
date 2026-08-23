@@ -250,7 +250,7 @@ planted median.
 | --- | --- | --- |
 | `ok` | Crosswalks clearly visible, normal conditions | ✓ |
 | `degraded` | Visible but conditions reduced — occlusion, shadows, dusk, glare, or a view that no longer matches the scene | ✓ |
-| `no_crosswalk` | No painted crosswalk visible at all | ✗ |
+| `no_crosswalk` | No painted crosswalk visible at all | ✓ (empty) |
 | `feed_down` | Source outage (placeholder image) | ✗ |
 
 There is no `needs_review` status. A repositioned camera or re-striped paint is
@@ -258,9 +258,12 @@ not an emergency in a camera-agnostic pipeline — the next run measures the new
 scene. A re-aimed camera with paint still visible reports `degraded` with
 `cameraMoved: "significant"`, never `no_crosswalk`.
 
-Publishing is gated on **detection, not classification.** Gemini has already
-rejected frames with no crosswalk, so any stripes Roboflow returns describe
-real paint. Any run that saw a stripe publishes; there are no other gates.
+Publishing is gated on **status, not stripe count.** Any status except
+`feed_down` publishes. When stripes are detected, they publish as before. When
+the camera has rotated away (`no_crosswalk`), the agent publishes `stripes: []`
+so the client disables the keyboard rather than freezing at a stale calibration
+from a different viewport. `feed_down` is the sole non-publishing status: a
+transient outage tells us nothing about the scene.
 
 ## Canonical data shapes
 

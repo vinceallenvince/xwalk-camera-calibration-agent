@@ -54,9 +54,14 @@ state between runs.
   frame width was chosen by replaying 341 archived runs across both cameras.
   Changing it needs a fresh replay, not a hunch — and note that a threshold
   relative to the median stripe gap was tried and is measurably worse.
-- **Publishing is gated on detection, not classification.** Any run with ≥1
-  detected stripe publishes. Partial reads are correct reads; never
-  reintroduce an expected-count gate.
+- **Publishing is gated on status, not stripe count (VIN-62, 2026-08-23).**
+  Any status except `feed_down` publishes. When stripes are detected, they
+  publish as before. When the camera has rotated away (`no_crosswalk`), the
+  agent publishes `stripes: []` so the client disables the keyboard rather
+  than freezing at a stale calibration from a different viewport. `feed_down`
+  is the sole non-publishing status: a transient outage tells us nothing
+  about the scene. Partial reads are still correct reads; never reintroduce
+  an expected-count gate.
 - **Status enum is `ok | degraded | no_crosswalk | feed_down`.** There is no
   `needs_review`. Triage reports two independent conditions axes:
   `occlusion` (physical) and `visibility` (lighting) — keep them separate.
