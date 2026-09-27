@@ -66,6 +66,49 @@ class TestRegistry:
         than geometry from the wrong view."""
         assert "no_crosswalk" in camera_config(80007).scene
 
+    def test_bellevue_ids_are_8_plus_the_cctv_number(self):
+        """VIN-84: BigQuery keys runs on an integer camera_id, so Bellevue's
+        CCTV### IDs map to 8 + the number, zero-padded. The web app uses the
+        same IDs; a mismatch publishes to a key nobody reads."""
+        for camera_id in (80003, 80007, 80009, 80027):
+            cctv = f"CCTV{camera_id - 80000:03d}"
+            config = camera_config(camera_id)
+            assert cctv in config.name
+            assert f"/{cctv}L.stream/" in config.hls_url
+
+    def test_new_bellevue_cameras_are_hls_cameras(self):
+        """VIN-84: like 80007, none of these has a usable still."""
+        for camera_id in (80003, 80009, 80027):
+            config = camera_config(camera_id)
+            assert config is CAMERAS[camera_id]
+            assert "Bellevue" in config.name
+            assert config.hls_url.endswith("/playlist.m3u8")
+            assert config.snapshot_url is None
+
+    def test_new_bellevue_scenes_route_a_ptz_turn_to_no_crosswalk(self):
+        for camera_id in (80003, 80009, 80027):
+            assert "no_crosswalk" in camera_config(camera_id).scene
+
+    def test_80009_scene_says_bike_squares_are_not_stripes(self):
+        """Green bike-crossing squares run beside two of 80009's crosswalks.
+        Triage must not read them as paint that belongs to a crosswalk."""
+        scene = camera_config(80009).scene
+        assert "green squares" in scene
+        assert "not crosswalk stripes" in scene
+
+    def test_bellevue_scenes_name_their_fixed_obstructions(self):
+        """A signal head or timestamp band that is always in frame is scene,
+        not occlusion — otherwise every run reports degraded for it."""
+        assert "signal head" in camera_config(80003).scene
+        assert "signal head" in camera_config(80009).scene
+        assert "timestamp band" in camera_config(80009).scene
+        assert "timestamp band" in camera_config(80027).scene
+
+    def test_80027_scene_still_reports_the_building_shadow(self):
+        """Shadows cost stripes, so the scene describes 80027's building
+        shadow without excusing it: on the paint it is still shadows."""
+        assert "that is shadows" in camera_config(80027).scene
+
     def test_still_cameras_have_no_stream(self):
         for camera_id in (5056, 5059, 5072):
             assert camera_config(camera_id).hls_url is None
