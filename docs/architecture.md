@@ -203,7 +203,7 @@ runtime image.
 | --- | --- | --- |
 | `GET /health` | None | Health check |
 | `POST /api/calibrate` | API key | Multipart frame upload → full calibration record |
-| `POST /api/calibrate-scheduled` | API key | Fetches a frame from the camera's snapshot source, then calibrates. `?cameraId=NNNN` selects the camera |
+| `POST /api/calibrate-scheduled` | API key | Fetches a frame from the camera's source (a still, or one frame decoded from its HLS stream), then calibrates. `?cameraId=NNNN` selects the camera |
 
 Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY`
 is set. The web app authenticates using a GCP identity token (Cloud Run IAM).
@@ -225,6 +225,8 @@ class CameraConfig:
     name: str                           # human-readable, used in the triage prompt
     scene: str                          # what the frame should show when normal
     snapshot_url: str | None = None     # explicit source; 511NY cameras omit this
+    hls_url: str | None = None          # video-stream source for cameras with no still
+    crosswalk_rank: int = 3             # homepage ordering, 1 = best
 ```
 
 There is deliberately no geometry here. Crosswalk counts and detection
@@ -233,7 +235,13 @@ discovered from the detections every run, so onboarding a camera is a scene
 description and a scheduler job.
 
 Cameras on 511NY need no `snapshot_url` — the template
-`https://511ny.org/map/Cctv/{camera_id}` derives it from the ID. An
+`https://511ny.org/map/Cctv/{camera_id}` derives it from the ID.
+
+Cameras with no usable still declare an `hls_url` instead. `app/frames.py`
+fetches the playlist, follows it to the chunklist, downloads only the newest
+`.ts` segment (~10 s), and decodes its first keyframe to PNG with PyAV. One
+segment per run keeps the load on the city's stream server small. Every
+downstream stage sees image bytes either way. An
 unregistered camera still calibrates with a generic triage prompt;
 registering it sharpens the triage.
 
@@ -242,7 +250,17 @@ two crosswalks separated by a bollard median; **View 5059** (West Street at
 W. 23 St, Manhattan), two crosswalks separated by a wide planted median with
 a large tree, both running off the sides of the frame; and **View 5072**
 (West Street at Chambers St, Manhattan), two crosswalks separated by a
-planted median.
+planted median; and **80007** (City of Bellevue CCTV007, Bellevue Way NE at
+NE 8th St, WA), an HLS-only pan-tilt-zoom camera over a four-way intersection
+with four crosswalks at different angles.
+
+80007 breaks the "runs along one line" assumption behind the gap clustering:
+its four crosswalks sit closer together than the 0.25 frame-width threshold,
+so they publish as a single `segment0`, and the crossing that runs vertically
+in frame plays in an order that wobbles between runs. That was accepted for
+VIN-80 — one keyboard that makes sound beats none. Per-crossing clustering
+would fix it but changes segmentation for every camera, so it needs its own
+replay.
 
 ## Status model
 
@@ -389,6 +407,7 @@ penalises frequent small reads.
 ```text
 main.py
   ├── cameras.py          camera registry and config
+  ├── frames.py           frame sources: HTTP stills, HLS segment decode
   ├── tools.py            Gemini triage + Roboflow stripe detection
   │     └── geometry.py   clustering and indexing (axis, gap, ordinal)
   ├── persist.py          BigQuery + GCS writes
@@ -402,9 +421,10 @@ thoroughly unit-tested.
 
 The pipeline is camera-agnostic; onboarding a camera is configuration:
 
-1. **Register it** in `app/cameras.py` — camera ID, human-readable name, and a
-   one-sentence scene description, which is the yardstick the triage prompt
-   judges frames against. There is no geometry to declare.
+1. **Register it** in `app/cameras.py` — camera ID, human-readable name, a
+   one-sentence scene description (the yardstick the triage prompt judges
+   frames against), and an `hls_url` if the camera only offers video. There
+   is no geometry to declare.
 2. **Schedule it** — create a Cloud Scheduler job targeting
    `/api/calibrate-scheduled?cameraId=NNNN`.
 3. **Wire the client** — add the camera to `LIVE_CAMERAS` in xwalk-keyboards
