@@ -5,7 +5,9 @@ being calibrated. A new camera judged against another camera's scene
 description would be flagged for not matching it.
 """
 
-from app.cameras import CAMERAS, CameraConfig, camera_config
+import pytest
+
+from app.cameras import CAMERAS, CameraConfig, UnknownCamera, camera_config
 from app.main import snapshot_url_for
 from app.tools import conditions_instruction
 
@@ -19,11 +21,11 @@ class TestRegistry:
     def test_registered_camera_uses_the_snapshot_template(self):
         assert camera_config(5056).frame_url == "https://511ny.org/map/Cctv/5056"
 
-    def test_unregistered_camera_gets_a_generic_config(self):
-        config = camera_config(9999)
-        assert config.camera_id == 9999
-        assert "9999" in config.name
-        assert config.frame_url == "https://511ny.org/map/Cctv/9999"
+    def test_unregistered_camera_is_refused(self):
+        """Only registered cameras calibrate; the endpoints turn this into a
+        404 rather than triaging an unknown view against a generic scene."""
+        with pytest.raises(UnknownCamera):
+            camera_config(9999)
 
     def test_5059_is_registered_with_its_own_scene(self):
         config = camera_config(5059)
@@ -83,9 +85,6 @@ class TestRegistry:
         assert camera_config(5072).crosswalk_rank == 3
         assert camera_config(5056).crosswalk_rank == 3
 
-    def test_unregistered_camera_gets_default_rank(self):
-        assert camera_config(9999).crosswalk_rank == 3
-
     def test_explicit_snapshot_url_wins_over_the_template(self):
         config = CameraConfig(
             camera_id=1, name="test cam", scene="a scene",
@@ -100,14 +99,14 @@ class TestTriagePrompt:
         assert "View 5056" in prompt
         assert "bollard median" in prompt
 
-    def test_unregistered_camera_is_not_judged_against_5056s_scene(self):
-        """The bug this module exists to prevent: a single-crosswalk camera
-        triaged against "two crosswalks separated by a bollard median" would
-        be flagged degraded for matching its own scene."""
-        prompt = conditions_instruction(camera_config(4321))
+    def test_prompt_is_not_judged_against_5056s_scene(self):
+        """The bug this module exists to prevent: a camera triaged against
+        another's "two crosswalks separated by a bollard median" would be
+        flagged degraded for matching its own scene."""
+        prompt = conditions_instruction(camera_config(80007))
         assert "5056" not in prompt
         assert "bollard" not in prompt
-        assert "4321" in prompt
+        assert "CCTV007" in prompt
 
     def test_prompt_carries_5059s_own_scene_not_a_neighbours(self):
         """5056, 5059, and 5072 all watch West Street and all show two
@@ -120,7 +119,7 @@ class TestTriagePrompt:
         assert "mounting" not in prompt
 
     def test_prompt_keeps_the_status_contract(self):
-        prompt = conditions_instruction(camera_config(4321))
+        prompt = conditions_instruction(camera_config(5056))
         for status in ("ok", "degraded", "no_crosswalk", "feed_down"):
             assert status in prompt
         assert "needs_review" not in prompt
@@ -146,4 +145,4 @@ class TestTriagePrompt:
 
 class TestScheduledSnapshotUrl:
     def test_camera_resolves_through_the_registry(self):
-        assert snapshot_url_for(7000) == "https://511ny.org/map/Cctv/7000"
+        assert snapshot_url_for(5059) == "https://511ny.org/map/Cctv/5059"

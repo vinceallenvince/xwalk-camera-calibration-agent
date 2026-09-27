@@ -5,9 +5,9 @@ alone — but two things genuinely differ per camera: where to fetch a frame
 from, and what the scene should look like, which is the context the Gemini
 triage prompt judges a frame against.
 
-Cameras not in the registry still work: they get a snapshot URL from the
-511NY template and a generic scene description, so pointing the agent at a
-new camera needs no code change — registering it just sharpens the triage.
+Only registered cameras calibrate. An unknown ID is refused (the endpoints
+answer 404) rather than triaged against a generic scene: onboarding a camera
+is one registry entry, and the registry is the list of what the agent serves.
 
 There is deliberately no geometry here. Segments are discovered from the
 detections each run (see geometry.place_stripes), so a camera never needs a
@@ -103,19 +103,14 @@ CAMERAS: dict[int, CameraConfig] = {
     ),
 }
 
-_GENERIC_SCENE = (
-    "No scene description is registered for this camera. Judge only what is "
-    "visible: one or more painted crosswalks may be in view."
-)
+
+class UnknownCamera(LookupError):
+    """The camera ID is not in the registry."""
 
 
 def camera_config(camera_id: int) -> CameraConfig:
-    """The registered config, or a generic one for an unregistered camera."""
-    config = CAMERAS.get(camera_id)
-    if config:
-        return config
-    return CameraConfig(
-        camera_id=camera_id,
-        name=f"traffic camera {camera_id}",
-        scene=_GENERIC_SCENE,
-    )
+    """The registered config. Raises UnknownCamera for an unregistered ID."""
+    try:
+        return CAMERAS[camera_id]
+    except KeyError:
+        raise UnknownCamera(camera_id) from None
