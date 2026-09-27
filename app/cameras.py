@@ -79,6 +79,28 @@ CAMERAS: dict[int, CameraConfig] = {
             "problem."
         ),
     ),
+    # City of Bellevue, WA (VIN-80). Bellevue's own ID is CCTV007, which is
+    # not numeric, so 80007 is an app-side ID shared with xwalk-keyboards.
+    # There is no usable still for this view: frames come from the stream.
+    80007: CameraConfig(
+        camera_id=80007,
+        name="City of Bellevue CCTV007 (Bellevue Way NE at NE 8th St, Bellevue, WA)",
+        hls_url=(
+            "https://trafficcams.bellevuewa.gov:443/traffic-edge/"
+            "CCTV007L.stream/playlist.m3u8"
+        ),
+        scene=(
+            "This camera looks down on a four-way intersection with a painted "
+            "zebra crosswalk on each side, at different angles: one runs "
+            "vertically down the near left of the frame, one runs across the "
+            "top, one runs diagonally down the right, and the fourth is only "
+            "partly visible at the bottom right, running off the frame edge. "
+            "Buildings, trees, parked cars, and white lane markings in the "
+            "middle of the intersection are all part of the normal scene. "
+            "This is a pan-tilt-zoom camera: if it has been turned so that no "
+            "crosswalk is in view, that is no_crosswalk, not a feed problem."
+        ),
+    ),
 }
 
 _GENERIC_SCENE = (
