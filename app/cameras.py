@@ -105,6 +105,7 @@ CAMERAS: dict[int, CameraConfig] = {
     ),
     80003: CameraConfig(
         camera_id=80003,
+        crosswalk_rank=2,
         name="City of Bellevue CCTV003 (100th Ave NE at NE 8th St, Bellevue, WA)",
         hls_url=(
             "https://trafficcams.bellevuewa.gov:443/traffic-edge/"
@@ -125,6 +126,7 @@ CAMERAS: dict[int, CameraConfig] = {
     ),
     80009: CameraConfig(
         camera_id=80009,
+        crosswalk_rank=2,
         name="City of Bellevue CCTV009 (Bellevue Way NE at Main St, Bellevue, WA)",
         hls_url=(
             "https://trafficcams.bellevuewa.gov:443/traffic-edge/"
@@ -147,6 +149,7 @@ CAMERAS: dict[int, CameraConfig] = {
     ),
     80027: CameraConfig(
         camera_id=80027,
+        crosswalk_rank=3,
         name="City of Bellevue CCTV027 (110th Ave NE at NE 8th St, Bellevue, WA)",
         hls_url=(
             "https://trafficcams.bellevuewa.gov:443/traffic-edge/"

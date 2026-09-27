@@ -128,6 +128,13 @@ class TestRegistry:
         assert camera_config(5072).crosswalk_rank == 3
         assert camera_config(5056).crosswalk_rank == 3
 
+    def test_bellevue_crosswalk_ranks(self):
+        """VIN-84: set from the first published runs. 80003 and 80009 read
+        cleanly; 80027 picks up a parking-lane arrow and a building shadow."""
+        assert camera_config(80003).crosswalk_rank == 2
+        assert camera_config(80009).crosswalk_rank == 2
+        assert camera_config(80027).crosswalk_rank == 3
+
     def test_explicit_snapshot_url_wins_over_the_template(self):
         config = CameraConfig(
             camera_id=1, name="test cam", scene="a scene",
