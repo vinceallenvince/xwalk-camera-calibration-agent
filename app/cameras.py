@@ -5,9 +5,9 @@ alone — but two things genuinely differ per camera: where to fetch a frame
 from, and what the scene should look like, which is the context the Gemini
 triage prompt judges a frame against.
 
-Cameras not in the registry still work: they get a snapshot URL from the
-511NY template and a generic scene description, so pointing the agent at a
-new camera needs no code change — registering it just sharpens the triage.
+Only registered cameras calibrate. An unknown ID is refused (the endpoints
+answer 404) rather than triaged against a generic scene: onboarding a camera
+is one registry entry, and the registry is the list of what the agent serves.
 
 There is deliberately no geometry here. Segments are discovered from the
 detections each run (see geometry.place_stripes), so a camera never needs a
@@ -79,9 +79,11 @@ CAMERAS: dict[int, CameraConfig] = {
             "problem."
         ),
     ),
-    # City of Bellevue, WA (VIN-80). Bellevue's own ID is CCTV007, which is
-    # not numeric, so 80007 is an app-side ID shared with xwalk-keyboards.
-    # There is no usable still for this view: frames come from the stream.
+    # City of Bellevue, WA (VIN-80, VIN-84). Bellevue's own IDs (CCTV007) are
+    # not numeric and BigQuery stores camera_id as an integer, so each gets
+    # an app-side ID shared with xwalk-keyboards: 8 followed by the CCTV
+    # number zero-padded to four digits (CCTV007 -> 80007). None of these
+    # cameras has a usable still: frames come from the stream.
     80007: CameraConfig(
         camera_id=80007,
         name="City of Bellevue CCTV007 (Bellevue Way NE at NE 8th St, Bellevue, WA)",
@@ -101,21 +103,79 @@ CAMERAS: dict[int, CameraConfig] = {
             "crosswalk is in view, that is no_crosswalk, not a feed problem."
         ),
     ),
+    80003: CameraConfig(
+        camera_id=80003,
+        name="City of Bellevue CCTV003 (100th Ave NE at NE 8th St, Bellevue, WA)",
+        hls_url=(
+            "https://trafficcams.bellevuewa.gov:443/traffic-edge/"
+            "CCTV003L.stream/playlist.m3u8"
+        ),
+        scene=(
+            "This camera looks down on a four-way intersection with a painted "
+            "zebra crosswalk on each side: one runs across the far side of "
+            "the intersection, one runs diagonally down the left, one runs "
+            "diagonally down the right, and the near crosswalk runs across "
+            "the bottom of the frame and off its bottom edge, so seeing only "
+            "part of it is normal. A traffic signal head mounted by the "
+            "camera covers the lower right corner. Buildings, trees, parked "
+            "cars, and lane markings are all part of the normal scene. "
+            "This is a pan-tilt-zoom camera: if it has been turned so that no "
+            "crosswalk is in view, that is no_crosswalk, not a feed problem."
+        ),
+    ),
+    80009: CameraConfig(
+        camera_id=80009,
+        name="City of Bellevue CCTV009 (Bellevue Way NE at Main St, Bellevue, WA)",
+        hls_url=(
+            "https://trafficcams.bellevuewa.gov:443/traffic-edge/"
+            "CCTV009L.stream/playlist.m3u8"
+        ),
+        scene=(
+            "This camera looks down on a four-way intersection with a painted "
+            "zebra crosswalk on each side: a large one across the foreground "
+            "at the bottom of the frame, one running up the left, one across "
+            "the far side, and one running diagonally down the right. Beside "
+            "the left and right crosswalks runs a bike crossing of green "
+            "squares; the green squares are bike-lane markings, not "
+            "crosswalk stripes. A traffic signal head mounted by the camera "
+            "covers part of the right side, and a black timestamp band runs "
+            "along the bottom edge. Buildings, trees, parked cars, and lane "
+            "markings are all part of the normal scene. "
+            "This is a pan-tilt-zoom camera: if it has been turned so that no "
+            "crosswalk is in view, that is no_crosswalk, not a feed problem."
+        ),
+    ),
+    80027: CameraConfig(
+        camera_id=80027,
+        name="City of Bellevue CCTV027 (110th Ave NE at NE 8th St, Bellevue, WA)",
+        hls_url=(
+            "https://trafficcams.bellevuewa.gov:443/traffic-edge/"
+            "CCTV027L.stream/playlist.m3u8"
+        ),
+        scene=(
+            "This camera looks down on an intersection with painted zebra "
+            "crosswalks on the left, across the far side, and diagonally down "
+            "the right, plus part of a fourth at the bottom right running off "
+            "the frame edge. The rooftop of the building the camera is "
+            "mounted on fills the lower left corner, and a white timestamp "
+            "band covers the bottom edge. In daylight a neighbouring "
+            "building casts a hard shadow that splits the frame; when it "
+            "falls across the paint, that is shadows. Buildings, trees, "
+            "parked cars, and lane markings are all part of the normal scene. "
+            "This is a pan-tilt-zoom camera: if it has been turned so that no "
+            "crosswalk is in view, that is no_crosswalk, not a feed problem."
+        ),
+    ),
 }
 
-_GENERIC_SCENE = (
-    "No scene description is registered for this camera. Judge only what is "
-    "visible: one or more painted crosswalks may be in view."
-)
+
+class UnknownCamera(LookupError):
+    """The camera ID is not in the registry."""
 
 
 def camera_config(camera_id: int) -> CameraConfig:
-    """The registered config, or a generic one for an unregistered camera."""
-    config = CAMERAS.get(camera_id)
-    if config:
-        return config
-    return CameraConfig(
-        camera_id=camera_id,
-        name=f"traffic camera {camera_id}",
-        scene=_GENERIC_SCENE,
-    )
+    """The registered config. Raises UnknownCamera for an unregistered ID."""
+    try:
+        return CAMERAS[camera_id]
+    except KeyError:
+        raise UnknownCamera(camera_id) from None

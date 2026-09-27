@@ -8,6 +8,9 @@
                                    Takes ?cameraId=NNNN; defaults to
                                    CALIBRATION_CAMERA_ID.
 
+Both calibrate endpoints answer 404 for a camera that is not registered in
+app/cameras.py.
+
 Cloud Scheduler hits /api/calibrate-scheduled on a fixed cadence (see the
 Cloud Scheduler job for the current interval) — one job per camera, each
 addressing its camera via the cameraId query parameter. Manual runs use
@@ -23,7 +26,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.cameras import camera_config
+from app.cameras import UnknownCamera, camera_config
 from app.coords import sniff_image_size
 from app.frames import fetch_frame
 from app.persist import save
@@ -48,6 +51,13 @@ def _frame_size(image: bytes) -> dict[str, int] | None:
     except Exception:  # noqa: BLE001
         return None
     return {"width": width, "height": height} if width and height else None
+
+
+def _require_registered(camera_id: int) -> None:
+    try:
+        camera_config(camera_id)
+    except UnknownCamera:
+        raise HTTPException(status_code=404, detail=f"Unknown camera {camera_id}") from None
 
 
 def run_calibration(
@@ -151,6 +161,7 @@ async def calibrate(
 ) -> JSONResponse:
     if API_KEY and request.headers.get("x-api-key") != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    _require_registered(cameraId)
 
     image = await frame.read()
     if not image:
@@ -193,6 +204,7 @@ async def calibrate_scheduled(request: Request, cameraId: int | None = None) -> 
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
     camera_id = cameraId if cameraId is not None else DEFAULT_CAMERA_ID
+    _require_registered(camera_id)
 
     import httpx
 

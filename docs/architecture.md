@@ -113,8 +113,7 @@ Roboflow on a blank frame or an outage placeholder.
 
 The triage prompt is per-camera: the scene description comes from
 `app/cameras.py`, so a new camera is judged against its own scene rather than
-against View 5056's bollard median. An unregistered camera gets a generic
-prompt and still calibrates.
+against View 5056's bollard median.
 
 **Conditions axes.** `occlusion` (what is physically covering the paint) and
 `visibility` (the lighting or atmospheric factor reducing contrast) are
@@ -207,7 +206,7 @@ runtime image.
 | --- | --- | --- |
 | `GET /health` | None | Health check |
 | `POST /api/calibrate` | API key | Multipart frame upload → full calibration record |
-| `POST /api/calibrate-scheduled` | API key | Fetches a frame from the camera's source (a still, or one frame decoded from its HLS stream), then calibrates. `?cameraId=NNNN` selects the camera |
+| `POST /api/calibrate-scheduled` | API key | Fetches a frame from the camera's source (a still, or one frame decoded from its HLS stream), then calibrates. `?cameraId=NNNN` selects the camera; an unregistered one is 404 |
 
 Authentication is via the `X-API-Key` header when `CALIBRATION_AGENT_API_KEY`
 is set. The web app authenticates using a GCP identity token (Cloud Run IAM).
@@ -245,26 +244,35 @@ Cameras with no usable still declare an `hls_url` instead. `app/frames.py`
 fetches the playlist, follows it to the chunklist, downloads only the newest
 `.ts` segment (~10 s), and decodes its first keyframe to PNG with PyAV. One
 segment per run keeps the load on the city's stream server small. Every
-downstream stage sees image bytes either way. An
-unregistered camera still calibrates with a generic triage prompt;
-registering it sharpens the triage.
+downstream stage sees image bytes either way.
 
-Currently registered: **View 5056** (West Street at W. 34 St, Manhattan),
-two crosswalks separated by a bollard median; **View 5059** (West Street at
-W. 23 St, Manhattan), two crosswalks separated by a wide planted median with
-a large tree, both running off the sides of the frame; and **View 5072**
-(West Street at Chambers St, Manhattan), two crosswalks separated by a
-planted median; and **80007** (City of Bellevue CCTV007, Bellevue Way NE at
-NE 8th St, WA), an HLS-only pan-tilt-zoom camera over a four-way intersection
-with four crosswalks at different angles.
+Only registered cameras calibrate: both calibrate endpoints answer 404 for an
+unknown `cameraId`, rather than triaging it against a generic scene.
 
-80007 breaks the "runs along one line" assumption behind the gap clustering:
-its four crosswalks sit closer together than the 0.25 frame-width threshold,
-so they publish as a single `segment0`, and the crossing that runs vertically
-in frame plays in an order that wobbles between runs. That was accepted for
-VIN-80 — one keyboard that makes sound beats none. Per-crossing clustering
-would fix it but changes segmentation for every camera, so it needs its own
-replay.
+Currently registered:
+
+| ID | Camera | Scene |
+| --- | --- | --- |
+| 5056 | 511NY View 5056, West Street at W. 34 St, Manhattan | Two crosswalks separated by a bollard median |
+| 5059 | 511NY View 5059, West Street at W. 23 St, Manhattan | Two crosswalks separated by a wide planted median with a large tree, both running off the sides of the frame |
+| 5072 | 511NY View 5072, West Street at Chambers St, Manhattan | Two crosswalks separated by a planted median |
+| 80003 | Bellevue CCTV003, 100th Ave NE at NE 8th St, WA | Four crosswalks; a signal head covers the lower right |
+| 80007 | Bellevue CCTV007, Bellevue Way NE at NE 8th St, WA | Four crosswalks at different angles |
+| 80009 | Bellevue CCTV009, Bellevue Way NE at Main St, WA | Four crosswalks; green bike-crossing squares beside two of them are not stripes |
+| 80027 | Bellevue CCTV027, 110th Ave NE at NE 8th St, WA | Three crosswalks and part of a fourth; a building shadow splits the frame in daylight |
+
+The Bellevue cameras are HLS-only pan-tilt-zoom cameras. Bellevue's own IDs
+(`CCTV007`) are not numeric and BigQuery stores `camera_id` as an integer, so
+each gets an app-side ID shared with xwalk-keyboards: `8` followed by the
+CCTV number zero-padded to four digits (`CCTV007` → `80007`).
+
+The Bellevue intersections break the "runs along one line" assumption behind
+the gap clustering: their crosswalks sit closer together than the 0.25
+frame-width threshold, so each camera publishes a single `segment0`, and a
+crossing that runs vertically in frame plays in an order that wobbles between
+runs. That was accepted for VIN-80 — one keyboard that makes sound beats
+none. Per-crossing clustering would fix it but changes segmentation for every
+camera, so it needs its own replay.
 
 ## Status model
 
@@ -434,8 +442,7 @@ The pipeline is camera-agnostic; onboarding a camera is configuration:
 3. **Wire the client** — add the camera to `LIVE_CAMERAS` in xwalk-keyboards
    (stream URL, segment anchors, reference calibration).
 
-An unregistered camera still calibrates with no code change — registering it
-sharpens the triage.
+Until step 1 lands, the agent answers 404 for the camera.
 
 ## Observability
 
@@ -477,9 +484,10 @@ Unit tests cover:
 - **geometry** — gap clustering into segments, positional segment naming,
   ordinal indexing, threshold scaling with frame width, and both accepted
   failure modes (occlusion over-split, narrow-median under-split)
-- **cameras** — registered cameras carry their scene, unregistered cameras get
-  generic defaults, triage prompt specialization, and an assertion that the
-  registry carries no geometry fields
+- **cameras** — registered cameras carry their scene, unregistered cameras are
+  refused, triage prompt specialization, and an assertion that the registry
+  carries no geometry fields
+- **endpoints** — both calibrate routes answer 404 for an unregistered camera
 
 The triage prompt has assertion-level tests for its contract: status enum
 completeness, occlusion/visibility separation, dusk/shadow vocabulary, the
