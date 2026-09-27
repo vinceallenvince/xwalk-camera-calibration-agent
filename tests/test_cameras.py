@@ -46,12 +46,18 @@ class TestRegistry:
         assert "mounting" in config.scene
         assert "planted median" in config.scene
 
+    def test_still_cameras_have_no_stream(self):
+        for camera_id in (5056, 5059, 5072):
+            assert camera_config(camera_id).hls_url is None
+
     def test_registry_carries_no_geometry(self):
         """Segments are discovered from the detections every run, so a camera
         never declares a crosswalk count or a detection threshold. Adding one
         back would reintroduce the per-camera tuning VIN-44 deleted."""
         fields = set(CameraConfig.__dataclass_fields__)
-        assert fields == {"camera_id", "name", "scene", "snapshot_url", "crosswalk_rank"}
+        assert fields == {
+            "camera_id", "name", "scene", "snapshot_url", "hls_url", "crosswalk_rank",
+        }
 
     def test_crosswalk_rank_initial_assignments(self):
         """VIN-70: 5059 is rank 1 (best composition), 5072 and 5056 are 3."""

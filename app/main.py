@@ -3,7 +3,8 @@
     GET  /health                   public health check
     POST /api/calibrate            multipart frame -> full calibration record
     POST /api/calibrate-scheduled  no body needed — fetches a frame from the
-                                   camera's snapshot source, then calibrates.
+                                   camera's source (still or HLS stream, see
+                                   app/frames.py), then calibrates.
                                    Takes ?cameraId=NNNN; defaults to
                                    CALIBRATION_CAMERA_ID.
 
@@ -24,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from app.cameras import camera_config
 from app.coords import sniff_image_size
+from app.frames import fetch_frame
 from app.persist import save
 from app.tools import analyse_conditions, detect_stripes
 
@@ -180,7 +182,8 @@ def snapshot_url_for(camera_id: int) -> str:
 @app.post("/api/calibrate-scheduled")
 async def calibrate_scheduled(request: Request, cameraId: int | None = None) -> JSONResponse:
     """Scheduled entry point — fetches the current frame from the camera's
-    snapshot source, then runs the same calibration pipeline as /api/calibrate.
+    source (a still, or one frame decoded from its HLS stream), then runs the
+    same calibration pipeline as /api/calibrate.
 
     Cloud Scheduler calls this with no body, one job per camera, addressing
     the camera with ?cameraId=NNNN. Omitting it calibrates the default camera
@@ -195,17 +198,14 @@ async def calibrate_scheduled(request: Request, cameraId: int | None = None) -> 
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(snapshot_url_for(camera_id))
-            resp.raise_for_status()
-            image = resp.content
-            content_type = resp.headers.get("content-type", "image/jpeg")
+            image, mime = await fetch_frame(
+                camera_config(camera_id), snapshot_url_for(camera_id), client
+            )
     except Exception as error:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Failed to fetch camera frame: {error}") from error
 
     if not image or len(image) < 1000:
         raise HTTPException(status_code=502, detail="Camera frame is empty or too small")
-
-    mime = "image/png" if "png" in content_type else "image/jpeg"
 
     try:
         record = run_calibration(image, mime, camera_id, source="scheduled")

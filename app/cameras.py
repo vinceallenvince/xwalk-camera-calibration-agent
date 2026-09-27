@@ -34,6 +34,9 @@ class CameraConfig:
     scene: str
     # Explicit snapshot source; cameras on the 511NY template can omit it.
     snapshot_url: str | None = None
+    # HLS playlist for cameras with no usable still. When set, the frame
+    # comes from the stream (app/frames.py) and snapshot_url is unused.
+    hls_url: str | None = None
     # Composition quality for homepage ordering (1 = best, 5 = worst).
     # The web app sorts camera links by this value ascending.
     crosswalk_rank: int = 3
