@@ -201,7 +201,11 @@ STRIPE_WORKFLOW_URL = os.environ.get(
     "CALIBRATION_STRIPE_WORKFLOW_URL",
     "https://serverless.roboflow.com/vince-vinceallen-com/workflows/crosswalk-stripe-detection-1786299496725",
 )
-MAX_WIDTH = 50
+# No maximum width (VIN-80). A 50px cap, tuned on West Street's narrow
+# vertical stripes, dropped every horizontal bar on Bellevue 80007's near-left
+# crossing. Removed outright to see in production whether wide false
+# positives are real enough to need a filter — widths are recoverable from
+# the stripes JSON in BigQuery.
 MIN_HEIGHT = 5
 MIN_CONFIDENCE = 0.5
 MIN_CENTROID_DIST = 5.0
@@ -250,8 +254,7 @@ def detect_stripes(image_bytes: bytes) -> dict[str, Any]:
 
     filtered = [
         p for p in raw
-        if p.get("width", 0) < MAX_WIDTH
-        and p.get("height", 0) >= MIN_HEIGHT
+        if p.get("height", 0) >= MIN_HEIGHT
         and p.get("confidence", 0) >= MIN_CONFIDENCE
     ]
     clean = _dedup(filtered)
