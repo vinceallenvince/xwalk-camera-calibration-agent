@@ -30,7 +30,9 @@ print-access-token` output, or use Application Default Credentials.
 **deterministic Python** in `main.run_calibration()` — there is no
 reasoning-loop agent. The only LLM prompt in the system is
 `conditions_instruction()` in `tools.py`, specialized per camera from the
-registry in `cameras.py`. `coords.py` sniffs image sizes. Nothing carries
+registry in `cameras.py`. `frames.py` gets the scheduled frame — an HTTP
+still, or one keyframe decoded (PyAV) from the newest segment of a camera's
+HLS stream. `coords.py` sniffs image sizes. Nothing carries
 state between runs.
 
 ## Load-bearing contracts

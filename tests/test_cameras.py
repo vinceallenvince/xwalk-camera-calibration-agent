@@ -46,12 +46,36 @@ class TestRegistry:
         assert "mounting" in config.scene
         assert "planted median" in config.scene
 
+    def test_80007_is_registered_as_an_hls_camera(self):
+        """VIN-80: Bellevue has no usable still, so the frame must come from
+        its video stream — a still from another camera would calibrate the
+        wrong view."""
+        config = camera_config(80007)
+        assert config is CAMERAS[80007]
+        assert "Bellevue" in config.name
+        assert config.hls_url == (
+            "https://trafficcams.bellevuewa.gov:443/traffic-edge/"
+            "CCTV007L.stream/playlist.m3u8"
+        )
+        assert config.snapshot_url is None
+
+    def test_80007_scene_routes_a_ptz_turn_to_no_crosswalk(self):
+        """A pan-tilt-zoom camera turned away must publish stripes: [] rather
+        than geometry from the wrong view."""
+        assert "no_crosswalk" in camera_config(80007).scene
+
+    def test_still_cameras_have_no_stream(self):
+        for camera_id in (5056, 5059, 5072):
+            assert camera_config(camera_id).hls_url is None
+
     def test_registry_carries_no_geometry(self):
         """Segments are discovered from the detections every run, so a camera
         never declares a crosswalk count or a detection threshold. Adding one
         back would reintroduce the per-camera tuning VIN-44 deleted."""
         fields = set(CameraConfig.__dataclass_fields__)
-        assert fields == {"camera_id", "name", "scene", "snapshot_url", "crosswalk_rank"}
+        assert fields == {
+            "camera_id", "name", "scene", "snapshot_url", "hls_url", "crosswalk_rank",
+        }
 
     def test_crosswalk_rank_initial_assignments(self):
         """VIN-70: 5059 is rank 1 (best composition), 5072 and 5056 are 3."""
