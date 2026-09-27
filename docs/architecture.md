@@ -135,8 +135,12 @@ Roboflow's job.
 **Module:** `app/tools.py` — `detect_stripes()`
 
 A Roboflow workflow returns paint-accurate instance-segmentation polygons for
-each visible stripe. Detections are filtered on size and confidence, then
-deduplicated by centroid distance.
+each visible stripe. Detections are filtered on a minimum height and on
+confidence, then deduplicated by centroid distance. There is deliberately no
+maximum width: a 50px cap tuned on West Street's narrow vertical stripes
+dropped every horizontal bar on camera 80007's near-left crossing, so it was
+removed (VIN-80) to observe in production whether wide false positives
+justify any filter at all.
 
 There is no second detection call. The agent used to run a boundary workflow
 alongside this one, to supply a stable index origin and a partition between
