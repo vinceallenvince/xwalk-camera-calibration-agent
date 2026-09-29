@@ -148,6 +148,18 @@ class TestFetchFrame:
 
         assert _run(go())[1] == "image/png"
 
+    def test_png_bytes_labelled_jpeg_are_png(self):
+        """VIN-88: public.carsprogram.org serves PNGs as image/jpeg."""
+        still = "https://example/still"
+        png = b"\x89PNG\r\n\x1a\n" + b"rest"
+        routes = {still: httpx.Response(200, content=png, headers={"content-type": "image/jpeg"})}
+
+        async def go():
+            async with _client(routes, []) as client:
+                return await fetch_frame(camera_config(5059), still, client)
+
+        assert _run(go()) == (png, "image/png")
+
     def test_hls_cameras_decode_from_the_stream_and_ignore_the_still_url(self, monkeypatch):
         requested: list[str] = []
         camera = CameraConfig(camera_id=1, name="t", scene="s", hls_url=BASE + "playlist.m3u8")
