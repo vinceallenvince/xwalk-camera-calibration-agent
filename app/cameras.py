@@ -23,6 +23,11 @@ SNAPSHOT_URL_TEMPLATE = os.environ.get(
     "https://511ny.org/map/Cctv/{camera_id}",
 )
 
+# NYSDOT stills on the Castle Rock host, keyed by stream ID (R11_275), not by
+# 511NY view ID. 511NY's own map path may not survive the 2026-09-30 cutover
+# (VIN-88). This host labels its PNGs image/jpeg; app/frames.py sniffs the bytes.
+NYSDOT_STILL_URL = "https://public.carsprogram.org/cameras/NYSDOT/{stream_id}.flv.png"
+
 
 @dataclass(frozen=True)
 class CameraConfig:
@@ -49,12 +54,14 @@ class CameraConfig:
 CAMERAS: dict[int, CameraConfig] = {
     5056: CameraConfig(
         camera_id=5056,
+        snapshot_url=NYSDOT_STILL_URL.format(stream_id="R11_272"),
         name="511NY View 5056 (West Street at W. 34 St, Manhattan)",
         scene="This camera shows two crosswalks separated by a bollard median.",
         crosswalk_rank=3,
     ),
     5059: CameraConfig(
         camera_id=5059,
+        snapshot_url=NYSDOT_STILL_URL.format(stream_id="R11_275"),
         name="511NY View 5059 (West Street at W. 23 St, Manhattan)",
         crosswalk_rank=1,
         scene=(
@@ -68,6 +75,7 @@ CAMERAS: dict[int, CameraConfig] = {
     ),
     5072: CameraConfig(
         camera_id=5072,
+        snapshot_url=NYSDOT_STILL_URL.format(stream_id="R11_279"),
         name="511NY View 5072 (West Street at Chambers St, Manhattan)",
         crosswalk_rank=3,
         scene=(

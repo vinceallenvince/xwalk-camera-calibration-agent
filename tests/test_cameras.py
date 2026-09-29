@@ -18,8 +18,13 @@ class TestRegistry:
         assert config is CAMERAS[5056]
         assert "bollard median" in config.scene
 
-    def test_registered_camera_uses_the_snapshot_template(self):
-        assert camera_config(5056).frame_url == "https://511ny.org/map/Cctv/5056"
+    def test_511ny_cameras_fetch_nysdot_stills_by_stream_id(self):
+        """VIN-88: 511ny.org/map/Cctv/ may not survive the 2026-09-30 cutover,
+        so the Manhattan cameras read Castle Rock stills keyed by stream ID."""
+        for camera_id, stream_id in ((5056, "R11_272"), (5059, "R11_275"), (5072, "R11_279")):
+            assert camera_config(camera_id).frame_url == (
+                f"https://public.carsprogram.org/cameras/NYSDOT/{stream_id}.flv.png"
+            )
 
     def test_unregistered_camera_is_refused(self):
         """Only registered cameras calibrate; the endpoints turn this into a
@@ -195,4 +200,6 @@ class TestTriagePrompt:
 
 class TestScheduledSnapshotUrl:
     def test_camera_resolves_through_the_registry(self):
-        assert snapshot_url_for(5059) == "https://511ny.org/map/Cctv/5059"
+        assert snapshot_url_for(5059) == (
+            "https://public.carsprogram.org/cameras/NYSDOT/R11_275.flv.png"
+        )

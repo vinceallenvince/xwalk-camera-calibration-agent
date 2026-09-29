@@ -123,5 +123,18 @@ async def fetch_frame(
 
     resp = await client.get(still_url)
     resp.raise_for_status()
-    content_type = resp.headers.get("content-type", "image/jpeg")
-    return resp.content, "image/png" if "png" in content_type else "image/jpeg"
+    return resp.content, still_mime(resp.content, resp.headers.get("content-type", ""))
+
+
+def still_mime(image: bytes, content_type: str) -> str:
+    """The still's real MIME type: its magic bytes win over the server's header.
+
+    public.carsprogram.org serves PNG data labelled image/jpeg (VIN-88), and
+    Gemini should be told what the bytes actually are. The header is only the
+    fallback for bytes that are neither PNG nor JPEG.
+    """
+    if image.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    return "image/png" if "png" in content_type else "image/jpeg"
