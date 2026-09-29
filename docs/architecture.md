@@ -237,8 +237,13 @@ thresholds both used to live on this dataclass and were deleted: segments are
 discovered from the detections every run, so onboarding a camera is a scene
 description and a scheduler job.
 
-Cameras on 511NY need no `snapshot_url` — the template
-`https://511ny.org/map/Cctv/{camera_id}` derives it from the ID.
+The 511NY cameras set `snapshot_url` to the NYSDOT still on the Castle Rock
+host, `https://public.carsprogram.org/cameras/NYSDOT/{streamId}.flv.png`,
+keyed by stream ID (`R11_275`) rather than by 511NY view ID (VIN-88). The
+older `https://511ny.org/map/Cctv/{camera_id}` template is still the fallback
+for a camera with no source declared, but it may not survive 511NY's
+2026-09-30 vendor cutover. The Castle Rock host labels its PNGs `image/jpeg`,
+so `fetch_frame` takes the MIME type from the image bytes, not the header.
 
 Cameras with no usable still declare an `hls_url` instead. `app/frames.py`
 fetches the playlist, follows it to the chunklist, downloads only the newest
