@@ -1,5 +1,12 @@
 # Calibration Agent Plan — Revised
 
+> **Out of date as of 2026-10-04.** This is the original design plan, kept for
+> history. Much of it no longer describes the system: there is no ADK agent
+> (orchestration is deterministic Python), no `needs_review` status, no
+> reference calibration or expected stripe counts, and publishing is gated on
+> status rather than on counts matching. See
+> [architecture.md](architecture.md) for the current design.
+
 ## Architecture
 
 The agent runs as a Google ADK agent on Cloud Run. On each scheduled run it
