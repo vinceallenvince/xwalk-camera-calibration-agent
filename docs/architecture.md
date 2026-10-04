@@ -12,7 +12,7 @@ The service has one job: detect where the crosswalk stripes are in the current
 camera frame, and publish their positions so the web app's keyboard stays on
 the paint.
 
-The architecture is designed around three non-negotiable properties:
+The architecture is designed around four non-negotiable properties:
 
 1. **Camera-agnostic geometry.** The production path holds no reference
    calibration, expects no particular number of stripes, and emits no note
@@ -190,9 +190,10 @@ Every run writes to three stores:
 | GCS `calibration/history/camera_NNNN/<runId>.json` + `.png` | Full JSON record and the source frame | Every run |
 | GCS `calibration/current/camera_NNNN.json` | The live calibration the web client reads | Publish runs only |
 
-A run publishes when it detected at least one stripe. Runs that publish
-nothing are still recorded in BigQuery and archived to GCS history, leaving
-the live calibration untouched.
+A run publishes unless its status is `feed_down` — see "Status model" below.
+A `no_crosswalk` run publishes `stripes: []`. A `feed_down` run is still
+recorded in BigQuery and archived to GCS history, leaving the live
+calibration untouched.
 
 ## Deployment unit
 
