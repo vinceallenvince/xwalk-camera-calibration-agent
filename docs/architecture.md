@@ -54,9 +54,9 @@ The architecture is designed around four non-negotiable properties:
       |                  |
       v                  v
 +------------+  +---------------------+
-| 511NY      |  | Roboflow Workflows  |
-| camera     |  | stripe segmentation |
-| snapshots  |  |                     |
+| Camera     |  | Roboflow Workflows  |
+| sources    |  | stripe segmentation |
+| still/HLS  |  |                     |
 +------------+  +---------------------+
 
 Persistence
@@ -71,7 +71,7 @@ GCS current → XWALK KEYBOARDS web app: page-load fetch
 flowchart LR
   Scheduler["Cloud Scheduler"]
   Agent["Calibration Agent\nCloud Run"]
-  NY["511NY\ncamera snapshots"]
+  Cams["Camera sources\nstills or HLS streams"]
   Gemini["Gemini 2.5 Flash\ntriage classification"]
   RF["Roboflow Workflows\nstripe segmentation"]
   BQ["BigQuery\nrun history"]
@@ -79,7 +79,7 @@ flowchart LR
   Web["XWALK KEYBOARDS\nweb app"]
 
   Scheduler -->|"POST every 15 min"| Agent
-  Agent -->|"fetch frame"| NY
+  Agent -->|"fetch frame"| Cams
   Agent -->|"classify frame"| Gemini
   Agent -->|"detect geometry"| RF
   Agent -->|"append row"| BQ
@@ -87,8 +87,8 @@ flowchart LR
   Web -->|"GET current calibration"| GCS
 ```
 
-The agent fetches a camera snapshot, asks Gemini whether the crosswalk is
-visible, and if so runs one Roboflow workflow for stripe polygons. Code groups
+The agent fetches a frame from the camera's source, asks Gemini whether the
+crosswalk is visible, and if so runs one Roboflow workflow for stripe polygons. Code groups
 those stripes into crosswalk segments and indexes each one, and persistence
 writes the result to BigQuery (for dashboards) and GCS (for the web client).
 
@@ -228,7 +228,7 @@ class CameraConfig:
     camera_id: int
     name: str                           # human-readable, used in the triage prompt
     scene: str                          # what the frame should show when normal
-    snapshot_url: str | None = None     # explicit source; 511NY cameras omit this
+    snapshot_url: str | None = None     # still-image source
     hls_url: str | None = None          # video-stream source for cameras with no still
     crosswalk_rank: int = 3             # homepage ordering, 1 = best
 ```
@@ -238,18 +238,20 @@ thresholds both used to live on this dataclass and were deleted: segments are
 discovered from the detections every run, so onboarding a camera is a scene
 description and a scheduler job.
 
-The 511NY cameras set `snapshot_url` to the NYSDOT still on the Castle Rock
-host, `https://public.carsprogram.org/cameras/NYSDOT/{streamId}.flv.png`,
-keyed by stream ID (`R11_275`) rather than by 511NY view ID (VIN-88). The
-older `https://511ny.org/map/Cctv/{camera_id}` template is still the fallback
-for a camera with no source declared, but it may not survive 511NY's
-2026-09-30 vendor cutover. The Castle Rock host labels its PNGs `image/jpeg`,
-so `fetch_frame` takes the MIME type from the image bytes, not the header.
+Frame sources are operated by third parties and change without notice, so
+the specific hosts and URLs live only in `app/cameras.py` — treat that file,
+not this document, as the source of truth for where each camera's frame
+comes from.
+
+A camera with a still image declares a `snapshot_url`; one that declares
+neither source falls back to `CALIBRATION_SNAPSHOT_URL_TEMPLATE`. Hosts do
+not always label their images correctly, so `fetch_frame` takes the MIME type
+from the image bytes, not the `Content-Type` header.
 
 Cameras with no usable still declare an `hls_url` instead. `app/frames.py`
 fetches the playlist, follows it to the chunklist, downloads only the newest
 `.ts` segment (~10 s), and decodes its first keyframe to PNG with PyAV. One
-segment per run keeps the load on the city's stream server small. Every
+segment per run keeps the load on the stream's host small. Every
 downstream stage sees image bytes either way.
 
 Only registered cameras calibrate: both calibrate endpoints answer 404 for an

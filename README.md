@@ -16,9 +16,9 @@ keyboard stays on the paint.
 
 Cloud Scheduler triggers the agent every 15 minutes per camera. Each run:
 
-1. **Fetches a frame** — a snapshot from [511NY](https://511ny.org) for the
-   Manhattan cameras, or one keyframe from the City of Bellevue's video
-   stream for the Bellevue cameras.
+1. **Fetches a frame** — a still image from the camera's public source, or
+   one keyframe from its video stream when it has no still. Sources are
+   configured per camera and change over time.
 2. **Gemini 2.5 Flash classifies the frame** — is the crosswalk visible? What
    are the conditions (occlusion, shadows, dusk, glare)? If the feed is down or
    the camera has rotated away, the run stops here.
