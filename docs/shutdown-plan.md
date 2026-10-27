@@ -105,7 +105,7 @@ Rollback: the same loop with `resume`.
 
 ### 2. Stop redeploys from this repo
 
-**In progress:** PR on branch `vince/retire-calibration-agent`.
+**Done 2026-10-27.** Merged in #21. The merge triggered no deploy.
 
 In one PR, before any other PR lands on `main` in this repo:
 
@@ -115,6 +115,11 @@ In one PR, before any other PR lands on `main` in this repo:
 
 ### 3. Soak while the web changes ship (about one week)
 
+**Cut short 2026-10-27.** xwalk-keyboards #66 deleted all three calibration
+routes and the Roboflow realtime routes, and it went live as revision
+`xwalk-keyboards-00099-mg8` at 18:26Z. The agent had no requests after the
+pause.
+
 - Watch the service's request logs. With the scheduler paused there should be
   none. A hit on `/api/calibrate` means the web's recalibrate route is still
   in use.
@@ -122,6 +127,22 @@ In one PR, before any other PR lands on `main` in this repo:
   called in production.
 
 ### 4. Remove the agent (destructive, after the soak)
+
+**Done 2026-10-27.** All 5 items below were completed and verified:
+
+- The 7 scheduler jobs are deleted, and none remain in `us-central1`.
+- The service is deleted. `xwalk-keyboards` is the only Cloud Run service
+  left.
+- The `xwalk-camera-calibration-agent` image package is deleted.
+  `cloud-run-source-deploy` now holds only `xwalk-keyboards`.
+- This repo's `workloadIdentityUser` member is removed. The xwalk-keyboards
+  member is intact.
+- All 9 objects in `calibration/current/` are deleted, including stale
+  `camera_5062` and `camera_90014`. Soft delete can restore them until
+  2026-11-03.
+
+All 29,918 frames in `calibration/history/` are still present. The homepage
+returned 200 afterwards.
 
 1. Delete the 7 scheduler jobs:
    `gcloud scheduler jobs delete calibrate-camera-<id> --location us-central1`
@@ -138,6 +159,12 @@ In one PR, before any other PR lands on `main` in this repo:
    can't mistake frozen calibration for live.
 
 ### 5. Roboflow
+
+**Waiting on the web service.** `xwalk-keyboards` still lists the `ROBOFLOW_*`
+env vars and mounts `ROBOFLOW_API_KEY` from the `roboflow-api-key` secret.
+Remove those references from the web service first, because new instances
+fail to start if a mounted secret is missing. Then delete the secret and
+revoke the key.
 
 - Delete or disable the stripe-segmentation workflow
   (`CALIBRATION_STRIPE_WORKFLOW_URL`).
