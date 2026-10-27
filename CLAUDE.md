@@ -2,6 +2,12 @@
 
 Guidance for Claude Code when working in this repository.
 
+> **Retired (2026-10).** The agent is being shut down. Its scheduler jobs are
+> paused, and merges no longer deploy. Follow
+> [docs/shutdown-plan.md](docs/shutdown-plan.md) rather than extending the
+> pipeline. Do not resume the scheduler jobs or redeploy without the user's
+> say-so.
+
 ## What this is
 
 A Cloud Run service that keeps [xwalk-keyboards](https://github.com/vinceallenvince/xwalk-keyboards)
@@ -18,7 +24,7 @@ changes — it documents the pipeline stages, data shapes, and design decisions.
 ```bash
 uv run pytest                                  # tests (add --no-sync if dependency sync fails)
 uv run uvicorn app.main:app --reload --port 8080   # local server
-gcloud run deploy xwalk-camera-calibration-agent --source . --region us-central1   # manual redeploy; merges deploy automatically
+gcloud run deploy xwalk-camera-calibration-agent --source . --region us-central1   # manual redeploy (the only deploy path since retirement)
 ```
 
 Local Vertex AI access: set `CALIBRATION_ACCESS_TOKEN` to `gcloud auth
@@ -82,9 +88,8 @@ state between runs.
 ## Workflow
 
 - Work is tracked in Linear (VIN-*). Branch from `main`, open a PR, one
-  concern per commit. Merging to `main` deploys to Cloud Run
-  (`.github/workflows/deploy.yml`); `gcloud run deploy` is only for a manual
-  redeploy.
+  concern per commit. Merging to `main` no longer deploys: the deploy
+  workflow was removed at retirement.
 - Debugging production: BigQuery for run history (status/reasoning/published),
   GCS history for the exact frame and record of any run, `tests/overlay.py`
   for eyeballing geometry.
