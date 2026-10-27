@@ -1,7 +1,8 @@
 # Calibration Agent Shutdown Plan
 
-Status: draft, 2026-10-26. Inventory verified against `xwalk-keyboards-01` the
-same day.
+Status: **complete, 2026-10-27.** Steps 1–6 are done. Step 7 (archiving the
+repo) is not planned. The inventory below records the system as it was on
+2026-10-26, before shutdown.
 
 The live-detection features of XWALK KEYBOARDS are being retired. The site
 keeps its homepage (now a YouTube video of recorded crossings, see the
@@ -160,11 +161,16 @@ returned 200 afterwards.
 
 ### 5. Roboflow
 
-**Waiting on the web service.** `xwalk-keyboards` still lists the `ROBOFLOW_*`
-env vars and mounts `ROBOFLOW_API_KEY` from the `roboflow-api-key` secret.
-Remove those references from the web service first, because new instances
-fail to start if a mounted secret is missing. Then delete the secret and
-revoke the key.
+**Done 2026-10-27.**
+
+- The web service dropped every `ROBOFLOW_*` and `CROSSWALK_AGENT_*` env var.
+  Revision `xwalk-keyboards-00102-md8` serves 100% of traffic with only
+  `CARLA_HLS_BASE_URL` set.
+- Both `roboflow-api-key` and `crosswalk-agent-api-key` were then deleted.
+  The project has no secrets left.
+- The homepage returned 200 afterwards.
+- The Roboflow key was handled in the Roboflow dashboard, which isn't
+  verifiable from GCP.
 
 - Delete or disable the stripe-segmentation workflow
   (`CALIBRATION_STRIPE_WORKFLOW_URL`).
@@ -177,6 +183,11 @@ revoke the key.
 
 ### 6. Data
 
+**Done 2026-10-27: kept as recommended.** BigQuery `calibration.runs`
+(29,357 rows) and all 29,918 frames in `calibration/history/` remain in
+Standard storage. The bucket has no lifecycle rules. A move to Coldline was
+not made.
+
 Recommended default: keep it.
 
 - `calibration/history/` (~5.7 GB): keep. Optionally add a lifecycle rule
@@ -187,13 +198,16 @@ Recommended default: keep it.
 
 ### 7. Archive the repo
 
+**Not planned.** The repo stays open (not archived) as of 2026-10-27.
+
 After step 4, archive `vinceallenvince/xwalk-camera-calibration-agent` on
 GitHub and close out the Linear work.
 
-## Open questions
+## Open questions (resolved)
 
-1. Should homepage camera links keep any notion of camera status, or become a
-   static list? This is for the web session, and it gates step 4.5.
-2. Is the agent's Roboflow key the same as the `roboflow-api-key` secret? Check
-   in the Roboflow dashboard, which decides how step 5 is sequenced.
-3. Should `calibration/history/` move to a colder storage class?
+1. Homepage camera status: resolved by xwalk-keyboards #66, which removed the
+   status route entirely.
+2. Roboflow key: moot. Both the secret and the web references were removed
+   before the key was handled.
+3. Colder storage for `calibration/history/`: not now. It stays in Standard
+   storage.
