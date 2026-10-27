@@ -2,6 +2,12 @@
 
 **Part of [XWALK KEYBOARDS](https://xwalkkeyboards.app)**
 
+> **Retired (2026-10).** XWALK KEYBOARDS no longer runs live detection, so
+> this agent is being shut down. Its scheduler jobs were paused on 2026-10-27,
+> and merges no longer deploy. See [docs/shutdown-plan.md](docs/shutdown-plan.md)
+> for the remaining steps. The rest of this README describes the system as it
+> ran.
+
 This agent keeps the crosswalk keyboard aligned with the painted stripes.
 Traffic cameras drift from wind, thermal expansion, and occasional re-aims —
 enough to shift the crosswalk tens of pixels in frame space. Without
@@ -84,5 +90,6 @@ Manager for Cloud Run deployments.
 
 ## Deployment
 
-Deployed to Cloud Run in `us-central1` (project `xwalk-keyboards-01`). Merges
-to `main` auto-deploy via GitHub Actions.
+Deployed to Cloud Run in `us-central1` (project `xwalk-keyboards-01`). The
+GitHub Actions deploy workflow was removed when the agent was retired; merges
+to `main` no longer deploy.
