@@ -2,11 +2,13 @@
 
 Guidance for Claude Code when working in this repository.
 
-> **Retired (2026-10).** The agent is being shut down. Its scheduler jobs are
-> paused, and merges no longer deploy. Follow
-> [docs/shutdown-plan.md](docs/shutdown-plan.md) rather than extending the
-> pipeline. Do not resume the scheduler jobs or redeploy without the user's
-> say-so.
+> **Retired (2026-10-27).** The agent is shut down. Its scheduler jobs, Cloud
+> Run service, images, and secrets are deleted, and the repo is kept for
+> reference. Treat the rest of this file as a description of the system as it
+> ran. Run history remains in BigQuery `calibration.runs` and GCS
+> `calibration/history/`. [docs/shutdown-plan.md](docs/shutdown-plan.md)
+> records what was removed. Do not redeploy or recreate any of it without the
+> user's say-so.
 
 ## What this is
 
@@ -24,7 +26,7 @@ changes — it documents the pipeline stages, data shapes, and design decisions.
 ```bash
 uv run pytest                                  # tests (add --no-sync if dependency sync fails)
 uv run uvicorn app.main:app --reload --port 8080   # local server
-gcloud run deploy xwalk-camera-calibration-agent --source . --region us-central1   # manual redeploy (the only deploy path since retirement)
+# (retired: the Cloud Run service was deleted; `gcloud run deploy` would recreate it)
 ```
 
 Local Vertex AI access: set `CALIBRATION_ACCESS_TOKEN` to `gcloud auth
